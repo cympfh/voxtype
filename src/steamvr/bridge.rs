@@ -111,7 +111,7 @@ pub fn overlay_fields(snapshot: &OverlaySnapshot) -> Vec<OverlayField> {
             action: OverlayAction::ToggleProofread,
         },
         OverlayField {
-            label: "エコー（そのまま）",
+            label: "エコー",
             enabled: snapshot.mode == Mode::Echo,
             indent: false,
             action: OverlayAction::SetMode(Mode::Echo),
@@ -338,11 +338,7 @@ mod tests {
             ),
             ("VRChat に入力", false, OverlayAction::ToggleVrchat),
             ("校正", false, OverlayAction::ToggleProofread),
-            (
-                "エコー（そのまま）",
-                false,
-                OverlayAction::SetMode(Mode::Echo),
-            ),
+            ("エコー", false, OverlayAction::SetMode(Mode::Echo)),
             ("翻訳", false, OverlayAction::SetMode(Mode::Translate)),
             ("質問 (AI)", false, OverlayAction::SetMode(Mode::Question)),
         ];
