@@ -405,7 +405,11 @@ impl App {
                 let _ = tx.send(result);
             });
             self.process_receiver = Some(rx);
-            self.status_message = "Grok で処理中...".to_string();
+            self.status_message = match self.config.mode {
+                Mode::Echo => "校正中...".to_string(),
+                Mode::Translate => "翻訳中...".to_string(),
+                Mode::Question => "質問中...".to_string(),
+            };
         }
         self.push_steamvr_snapshot();
     }
