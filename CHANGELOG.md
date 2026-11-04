@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PC 側の画面を egui から Slint (fluent スタイル) で作り直した。送り先・加工の切り替えはグループに整理
 - PC 側ウィンドウと exe のアイコンを voxtype の新しいアイコンに変更。SteamVR のタブ・アプリ一覧のアイコンは VRC Companion のロゴのまま
 - 設定ページの Silence Threshold のスライダーは対数目盛りではなくなった
+- 質問モードは構造化出力 ({context, citation, answer}) を使い、VRChat に送るのは回答文 (answer) のみになった。参考 URL や前置きは出ない
 
 ### Added
 
