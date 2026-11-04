@@ -72,8 +72,9 @@ component ModeSegment inherits HorizontalLayout {
     spacing: 0px;
     for label[i] in ["エコー", "翻訳", "質問 (AI)"]: Button {
         text: label;
-        checkable: true;
-        checked: root.mode == i;
+        // checkable だとボタン自身が checked を持って複数選択状態になるので、
+        // 選択中は primary の色で表すだけにする
+        primary: root.mode == i;
         clicked => {
             root.mode = i;
             root.mode-changed(i);
