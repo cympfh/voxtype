@@ -21,6 +21,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::mpsc::{Receiver, channel};
+use std::time::Instant;
 use steamvr::{OverlayAction, OverlayHandle, OverlaySnapshot};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -89,6 +90,34 @@ fn main() -> Result<(), slint::PlatformError> {
     window.run()
 }
 
+/// 無音/発話の自動キャリブレーションの進行状態
+struct Calibration {
+    recorder: AudioRecorder,
+    /// チャンク受信側。drop されると送信が詰まるので保持だけする
+    _rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
+    /// 0=無音(5秒), 1=発話(5秒), 2=無音(5秒)
+    phase: u8,
+    phase_start: Instant,
+    noise_samples: Vec<f32>,
+    speech_samples: Vec<f32>,
+    /// フェーズ2終了時に計算した推奨 threshold
+    new_threshold: Option<f32>,
+    /// フェーズ3でレベルが threshold を下回るまでの秒数(発話の尾ひれ)
+    tail_secs: Option<f32>,
+}
+
+const CALIB_PHASE_SECS: f32 = 5.0;
+
+fn percentile(samples: &[f32], q: f32) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut v = samples.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((v.len() - 1) as f32 * q).round() as usize;
+    v[idx]
+}
+
 pub enum TranscriptionMessage {
     Partial(String),
     Success(String),
@@ -125,6 +154,9 @@ struct App {
     /// 録音開始/停止のグローバルショートカット
     hotkey_manager: Option<GlobalHotKeyManager>,
     registered_hotkey: Option<HotKey>,
+
+    /// 実行中の自動キャリブレーション
+    calibration: Option<Calibration>,
 }
 
 impl App {
@@ -165,9 +197,139 @@ impl App {
             ui_config_dirty: false,
             hotkey_manager: None,
             registered_hotkey: None,
+            calibration: None,
         };
         app.register_shortcut();
         app
+    }
+
+    /// 自動キャリブレーションの開始/中止(設定ページのボタン)
+    fn toggle_calibration(&mut self, window: &MainWindow) {
+        if self.calibration.is_some() {
+            self.calibration = None;
+            window.set_calib_active(false);
+            window.set_calib_guide("中止しました".into());
+            window.set_level(0.0);
+            return;
+        }
+        if self.is_recording {
+            window.set_calib_guide("録音中はキャリブレーションできません".into());
+            return;
+        }
+        let idx = window.get_device_index().max(0) as usize;
+        let device_name = if idx == 0 {
+            None
+        } else {
+            self.available_devices.get(idx).cloned()
+        };
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut recorder = AudioRecorder::new(0.0);
+        if let Err(e) = recorder.start_recording(device_name.as_deref(), tx) {
+            window.set_calib_guide(format!("マイクを開けません: {}", e).into());
+            return;
+        }
+        self.calibration = Some(Calibration {
+            recorder,
+            _rx: rx,
+            phase: 0,
+            phase_start: Instant::now(),
+            noise_samples: Vec::new(),
+            speech_samples: Vec::new(),
+            new_threshold: None,
+            tail_secs: None,
+        });
+        window.set_calib_active(true);
+    }
+
+    /// キャリブレーションの採取とフェーズ進行。tick から毎回呼ぶ
+    fn tick_calibration(&mut self, window: &MainWindow) {
+        let Some(calib) = &mut self.calibration else {
+            return;
+        };
+        let level = calib.recorder.get_max_amplitude();
+        let elapsed = calib.phase_start.elapsed().as_secs_f32();
+        let remaining = (CALIB_PHASE_SECS - elapsed).max(0.0).ceil();
+        match calib.phase {
+            0 => {
+                calib.noise_samples.push(level);
+                window.set_calib_guide(
+                    format!("① 無音のまま待ってください… あと {:.0} 秒", remaining).into(),
+                );
+            }
+            1 => {
+                calib.speech_samples.push(level);
+                window
+                    .set_calib_guide(format!("② 話してください… あと {:.0} 秒", remaining).into());
+            }
+            _ => {
+                if calib.tail_secs.is_none()
+                    && let Some(t) = calib.new_threshold
+                    && level < t
+                {
+                    calib.tail_secs = Some(elapsed);
+                }
+                window.set_calib_guide(
+                    format!("③ もう一度無音にしてください… あと {:.0} 秒", remaining).into(),
+                );
+            }
+        }
+        window.set_level(level);
+        if let Some(t) = calib.new_threshold {
+            window.set_level_below_threshold(level < t);
+        }
+
+        if elapsed < CALIB_PHASE_SECS {
+            return;
+        }
+        match calib.phase {
+            0 => {
+                calib.phase = 1;
+                calib.phase_start = Instant::now();
+            }
+            1 => {
+                let noise = percentile(&calib.noise_samples, 0.95);
+                let speech = percentile(&calib.speech_samples, 0.50);
+                // 無音と発話の幾何平均を推奨 threshold とする
+                let t = (noise * speech).sqrt().clamp(0.001, 0.3);
+                calib.new_threshold = Some(t);
+                calib.phase = 2;
+                calib.phase_start = Instant::now();
+            }
+            _ => self.finish_calibration(window),
+        }
+    }
+
+    /// 採取結果から推奨値をスライダーに反映する(config への確定は保存ボタン)
+    fn finish_calibration(&mut self, window: &MainWindow) {
+        let Some(calib) = self.calibration.take() else {
+            return;
+        };
+        drop(calib.recorder);
+        let threshold = calib.new_threshold.unwrap_or(self.config.silence_threshold);
+        let duration = (calib.tail_secs.unwrap_or(0.5) + 0.5).clamp(0.5, 3.0);
+        window.set_silence_threshold(threshold);
+        window.set_silence_duration(duration);
+        window.set_calib_active(false);
+        window.set_level(0.0);
+        let noise = percentile(&calib.noise_samples, 0.95);
+        let speech = percentile(&calib.speech_samples, 0.50);
+        if speech < noise * 1.5 {
+            window.set_calib_guide(
+                format!(
+                    "声が小さいか検出できませんでした。暫定値 Threshold={:.3} / Duration={:.1}秒 を入れたのでスライダーで調整し、保存してください",
+                    threshold, duration
+                )
+                .into(),
+            );
+        } else {
+            window.set_calib_guide(
+                format!(
+                    "完了。推奨値 Threshold={:.3} / Duration={:.1}秒 を入れました。保存してください",
+                    threshold, duration
+                )
+                .into(),
+            );
+        }
     }
 
     /// config.shortcut_key をグローバルショートカットとして登録し直す。空なら解除のみ
@@ -229,6 +391,8 @@ impl App {
                 self.toggle_recording(window);
             }
         }
+
+        self.tick_calibration(window);
 
         if let Some(overlay) = &self.steamvr_overlay
             && overlay.exit_requested()
@@ -671,7 +835,7 @@ impl App {
             let level = recorder.get_max_amplitude();
             window.set_level(level);
             window.set_level_below_threshold(level < self.config.silence_threshold);
-        } else {
+        } else if self.calibration.is_none() {
             window.set_recording_info("".into());
             window.set_silence_progress(0.0);
             window.set_level(0.0);
@@ -858,6 +1022,14 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
     {
         let app = app.clone();
         let weak = window.as_weak();
+        window.on_start_calibration(move || {
+            let Some(window) = weak.upgrade() else { return };
+            app.borrow_mut().toggle_calibration(&window);
+        });
+    }
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
         window.on_open_settings(move || {
             let Some(window) = weak.upgrade() else { return };
             let app = app.borrow();
@@ -958,6 +1130,7 @@ fn rows_from_buttons(buttons: &[AvatarButton; 4]) -> slint::ModelRc<AvatarButton
 
 #[cfg(test)]
 mod shortcut_tests {
+    use crate::percentile;
     use global_hotkey::hotkey::HotKey;
     use std::str::FromStr;
 
@@ -967,5 +1140,18 @@ mod shortcut_tests {
         assert!(HotKey::from_str("Ctrl+Shift+F9").is_ok());
         assert!(HotKey::from_str("ctrl+shift+r").is_ok());
         assert!(HotKey::from_str("not a key").is_err());
+    }
+
+    #[test]
+    fn test_percentile() {
+        assert_eq!(percentile(&[], 0.5), 0.0);
+        assert_eq!(percentile(&[0.1, 0.2, 0.3], 0.0), 0.1);
+        assert_eq!(percentile(&[0.1, 0.2, 0.3], 0.5), 0.2);
+        assert_eq!(percentile(&[0.1, 0.2, 0.3], 0.95), 0.3);
+        // 幾何平均の推奨値が無音と発話の間に入る
+        let noise = percentile(&[0.01; 100], 0.95);
+        let speech = percentile(&[0.3; 100], 0.50);
+        let t = (noise * speech).sqrt().clamp(0.001, 0.3);
+        assert!(noise < t && t < speech);
     }
 }

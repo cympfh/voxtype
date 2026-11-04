@@ -230,9 +230,13 @@ export component MainWindow inherits Window {
     in-out property <string> translate-langs-text: "";
     // 録音開始/停止のグローバルショートカットキー(空で無効)
     in-out property <string> shortcut-key: "";
+    // 自動キャリブレーション
+    in-out property <bool> calib-active: false;
+    in-out property <string> calib-guide: "";
 
     // --- コールバック ---
     callback start-stop();
+    callback start-calibration();
     callback toggle-clipboard(bool);
     callback toggle-auto-input(bool);
     callback toggle-send-enter(bool);
@@ -427,6 +431,23 @@ export component MainWindow inherits Window {
                     minimum: 0.001;
                     maximum: 0.3;
                     value <=> root.silence-threshold;
+                }
+
+                if root.calib-guide != "": Text {
+                    text: root.calib-guide;
+                    color: #d69c46;
+                    font-weight: 700;
+                    wrap: word-wrap;
+                }
+                if root.calib-active: LevelBar {
+                    level: root.level;
+                    below-threshold: root.level-below-threshold;
+                }
+                Button {
+                    text: root.calib-active ? "中止" : "🎤 自動キャリブレーション (無音5秒 → 発話5秒 → 無音5秒)";
+                    primary: !root.calib-active;
+                    min-height: 44px;
+                    clicked => { root.start-calibration(); }
                 }
 
                 Text { text: "ショートカットキー (録音開始/停止、空欄で無効):"; }
