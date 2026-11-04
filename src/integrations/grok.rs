@@ -101,6 +101,11 @@ const QUESTION_PROMPT: &str = "\
 <instruction>
 web_search, x_search を使って、ユーザーの質問に答えることが求められています。
 自分の知識は使わず、web/X検索を積極的に利用せよ。
+
+出力は構造化フォーマットに従うこと:
+- context: 回答の根拠・補足など、ユーザーに見せないメモ
+- citation: 参考にした URL の一覧
+- answer: ユーザーへの最終回答文だけ。URL・出典表記・前置きを含めない
 </instruction>";
 
 #[derive(Serialize)]
@@ -127,6 +132,35 @@ struct BuiltinTool<'a> {
     tool_type: &'a str,
 }
 
+#[derive(Serialize)]
+struct JsonSchemaFormat<'a> {
+    #[serde(rename = "type")]
+    format_type: &'a str,
+    name: &'a str,
+    strict: bool,
+    schema: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct TextFormat<'a> {
+    format: JsonSchemaFormat<'a>,
+}
+
+/// 質問モードの構造化出力スキーマ。context/citation はモデルに書き出させるが
+/// アプリ側では捨てる。answer にはユーザーへの回答文だけが入る
+fn question_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "context": {"type": "string"},
+            "citation": {"type": "string"},
+            "answer": {"type": "string"},
+        },
+        "required": ["context", "citation", "answer"],
+        "additionalProperties": false,
+    })
+}
+
 /// Responses API (Agent Tools) のリクエスト。質問モード専用
 #[derive(Serialize)]
 struct ResponsesRequest<'a> {
@@ -134,6 +168,7 @@ struct ResponsesRequest<'a> {
     reasoning: Reasoning<'a>,
     input: Vec<ChatMessage<'a>>,
     tools: Vec<BuiltinTool<'a>>,
+    text: TextFormat<'a>,
 }
 
 pub struct GrokClient {
@@ -193,6 +228,14 @@ impl GrokClient {
                     tool_type: "code_execution",
                 },
             ],
+            text: TextFormat {
+                format: JsonSchemaFormat {
+                    format_type: "json_schema",
+                    name: "question_answer",
+                    strict: true,
+                    schema: question_schema(),
+                },
+            },
         };
 
         // 検索が走ると時間がかかるので長めに待つ
@@ -234,6 +277,13 @@ impl GrokClient {
         let joined = texts.join("\n");
         let joined = joined.trim();
         if !joined.is_empty() {
+            // 構造化出力の JSON から answer だけ取り出す。context/citation は捨てる
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(joined)
+                && let Some(answer) = v["answer"].as_str()
+                && !answer.trim().is_empty()
+            {
+                return Ok(answer.trim().to_string());
+            }
             return Ok(joined.to_string());
         }
         // 念のためトップレベルの output_text も見る
@@ -361,12 +411,26 @@ mod tests {
                     tool_type: "x_search",
                 },
             ],
+            text: TextFormat {
+                format: JsonSchemaFormat {
+                    format_type: "json_schema",
+                    name: "question_answer",
+                    strict: true,
+                    schema: question_schema(),
+                },
+            },
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"reasoning\":{\"effort\":\"low\"}"));
         assert!(json.contains("\"type\":\"web_search\""));
         assert!(json.contains("\"type\":\"x_search\""));
         assert!(!json.contains("search_parameters"));
+        // 構造化出力: answer を最後に持つスキーマを送る
+        assert!(json.contains("\"type\":\"json_schema\""));
+        assert!(json.contains("\"name\":\"question_answer\""));
+        let answer_pos = json.find("\"answer\"").unwrap();
+        let citation_pos = json.find("\"citation\"").unwrap();
+        assert!(citation_pos < answer_pos);
     }
 
     #[test]
