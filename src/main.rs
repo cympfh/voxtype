@@ -13,10 +13,13 @@ use audio::AudioRecorder;
 use audio::speech_to_text::SpeechToTextClient;
 use avatar_buttons::{AvatarButton, ParamType, ToggleStates};
 use config::{Config, Mode};
+use global_hotkey::hotkey::HotKey;
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use integrations::{auto_input, grok, vrchat};
 use slint::Model;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::str::FromStr;
 use std::sync::mpsc::{Receiver, channel};
 use steamvr::{OverlayAction, OverlayHandle, OverlaySnapshot};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -118,6 +121,10 @@ struct App {
 
     /// オーバーレイ側から config が変わったら true。次の tick で UI に流す
     ui_config_dirty: bool,
+
+    /// 録音開始/停止のグローバルショートカット
+    hotkey_manager: Option<GlobalHotKeyManager>,
+    registered_hotkey: Option<HotKey>,
 }
 
 impl App {
@@ -139,7 +146,7 @@ impl App {
             config.steamvr_overlay_width_m,
         );
 
-        Self {
+        let mut app = Self {
             config,
             is_recording: false,
             is_transcribing: false,
@@ -156,11 +163,73 @@ impl App {
             available_devices,
             selected_device_index,
             ui_config_dirty: false,
+            hotkey_manager: None,
+            registered_hotkey: None,
+        };
+        app.register_shortcut();
+        app
+    }
+
+    /// config.shortcut_key をグローバルショートカットとして登録し直す。空なら解除のみ
+    fn register_shortcut(&mut self) {
+        if let (Some(manager), Some(hotkey)) = (&self.hotkey_manager, &self.registered_hotkey) {
+            let _ = manager.unregister(*hotkey);
         }
+        self.registered_hotkey = None;
+        let key = self.config.shortcut_key.trim();
+        if key.is_empty() {
+            return;
+        }
+        if self.hotkey_manager.is_none() {
+            match GlobalHotKeyManager::new() {
+                Ok(m) => self.hotkey_manager = Some(m),
+                Err(e) => {
+                    crate::log!("ホットキーマネージャの作成に失敗: {}", e);
+                    return;
+                }
+            }
+        }
+        let manager = self.hotkey_manager.as_ref().unwrap();
+        match HotKey::from_str(key) {
+            Ok(hotkey) => match manager.register(hotkey) {
+                Ok(()) => self.registered_hotkey = Some(hotkey),
+                Err(e) => crate::log!("ショートカット {} の登録に失敗: {}", key, e),
+            },
+            Err(e) => crate::log!("ショートカット {} の解析に失敗: {}", key, e),
+        }
+    }
+
+    /// 録音の開始/停止をトグルする(録音ボタンとショートカットの共通処理)
+    fn toggle_recording(&mut self, window: &MainWindow) {
+        if self.is_recording {
+            self.is_recording = false;
+            self.on_stop_recording();
+        } else {
+            self.is_recording = true;
+            self.on_start_recording();
+        }
+        self.push_steamvr_snapshot();
+        self.sync_display_to_ui(window);
     }
 
     /// 50ms ごとに呼ばれる。チャネルの回収・無音の自動停止・UI への反映をまとめてやる
     fn tick(&mut self, window: &MainWindow) {
+        // グローバルショートカットのイベントを回収
+        {
+            let mut toggle = false;
+            while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+                if event.state == HotKeyState::Pressed
+                    && self.registered_hotkey.map(|h| h.id()) == Some(event.id)
+                {
+                    toggle = true;
+                }
+            }
+            if toggle {
+                crate::log!("ショートカットキーで録音をトグル");
+                self.toggle_recording(window);
+            }
+        }
+
         if let Some(overlay) = &self.steamvr_overlay
             && overlay.exit_requested()
         {
@@ -683,16 +752,7 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
         let weak = window.as_weak();
         window.on_start_stop(move || {
             let Some(window) = weak.upgrade() else { return };
-            let mut app = app.borrow_mut();
-            if app.is_recording {
-                app.is_recording = false;
-                app.on_stop_recording();
-            } else {
-                app.is_recording = true;
-                app.on_start_recording();
-            }
-            app.push_steamvr_snapshot();
-            app.sync_display_to_ui(&window);
+            app.borrow_mut().toggle_recording(&window);
         });
     }
 
@@ -817,6 +877,7 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
             } else {
                 0
             });
+            window.set_shortcut_key(app.config.shortcut_key.clone().into());
             window.set_show_settings(true);
         });
     }
@@ -844,6 +905,8 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
             } else {
                 "EN".to_string()
             };
+            app.config.shortcut_key = window.get_shortcut_key().trim().to_string();
+            app.register_shortcut();
             if let Err(e) = app.config.save() {
                 crate::log!("Failed to save config: {}", e);
             }
@@ -895,4 +958,18 @@ fn rows_from_buttons(buttons: &[AvatarButton; 4]) -> slint::ModelRc<AvatarButton
         })
         .collect();
     slint::ModelRc::new(slint::VecModel::from(rows))
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use global_hotkey::hotkey::HotKey;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_shortcut_key_parse() {
+        assert!(HotKey::from_str("F9").is_ok());
+        assert!(HotKey::from_str("Ctrl+Shift+F9").is_ok());
+        assert!(HotKey::from_str("ctrl+shift+r").is_ok());
+        assert!(HotKey::from_str("not a key").is_err());
+    }
 }

@@ -53,6 +53,9 @@ pub struct Config {
     /// SteamVR オーバーレイの表示幅(メートル)。起動時に読む
     #[serde(default = "default_steamvr_overlay_width_m")]
     pub steamvr_overlay_width_m: f32,
+    /// 録音開始/停止のグローバルショートカットキー。空なら無効
+    #[serde(default = "default_shortcut_key")]
+    pub shortcut_key: String,
     /// VR パネル右端の A/B/X/Y ボタン(アバターパラメーター)
     #[serde(default = "crate::avatar_buttons::default_buttons")]
     pub avatar_buttons: [crate::avatar_buttons::AvatarButton; 4],
@@ -84,6 +87,10 @@ fn default_vrchat_enabled() -> bool {
 
 fn default_translate_lang_preset() -> String {
     "EN".to_string()
+}
+
+fn default_shortcut_key() -> String {
+    "F9".to_string()
 }
 
 fn default_translate_lang_custom() -> String {
@@ -132,6 +139,7 @@ impl Default for Config {
             translate_format: default_translate_format(),
             question_format: default_question_format(),
             steamvr_overlay_width_m: default_steamvr_overlay_width_m(),
+            shortcut_key: default_shortcut_key(),
             avatar_buttons: crate::avatar_buttons::default_buttons(),
         }
     }

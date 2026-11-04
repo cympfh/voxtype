@@ -16,6 +16,7 @@ futures-util = "0.3"
 dirs = "5.0"
 arboard = "3.3"
 enigo = "0.6.1"
+global-hotkey = "0.6"
 rosc = "0.10"
 chrono = "0.4.45"
 

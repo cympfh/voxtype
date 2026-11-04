@@ -226,6 +226,8 @@ export component MainWindow inherits Window {
     in-out property <string> question-format: "";
     // 翻訳先言語: 0=EN, 1=ZH
     in-out property <int> translate-lang-index: 0;
+    // 録音開始/停止のグローバルショートカットキー(空で無効)
+    in-out property <string> shortcut-key: "";
 
     // --- コールバック ---
     callback start-stop();
@@ -431,6 +433,12 @@ export component MainWindow inherits Window {
                     minimum: 0.001;
                     maximum: 0.3;
                     value <=> root.silence-threshold;
+                }
+
+                Text { text: "ショートカットキー (録音開始/停止、空欄で無効):"; }
+                LineEdit {
+                    text <=> root.shortcut-key;
+                    placeholder-text: "例: F9, Ctrl+Shift+R";
                 }
 
                 Text { text: "翻訳先言語:"; }
