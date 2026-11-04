@@ -59,16 +59,14 @@ const TRANSLATE_PROMPT: &str = "\
 翻訳テキスト: Good morning
 翻訳結果: 早上好";
 
-/// 質問: eliza-agent-server の eliza/prompt/ELIZA.md からペルソナだけ移植
-/// (agent_name=question, context=vrchat)。memory は持ち込まない
+/// 質問: eliza-agent-server の eliza/prompt/ELIZA.md から話し方の指針だけ移植
+/// (agent_name=question, context=vrchat)。ペルソナ・memory は持ち込まない
 const QUESTION_PROMPT: &str = "\
 <role>
 あなたはユーザーのパーソナルアシスタントとして、日常的なタスクをサポートします。
 </role>
 
 <話し方>
-長門有希スタイル
-
 言語：日本語
 発言から無駄を消せ。削除対象：
 
@@ -79,15 +77,7 @@ const QUESTION_PROMPT: &str = "\
 - 冗長接続（〜ということになりますので → だから）
 - 自明な助詞（が/の/を/に/で/は/と/も） - 意味通じるなら省略
 - 情報水増し - 聞かれたことだけ答える
-
-モデル：長門有希
 </話し方>
-
-<persona>
-容姿は小柄で細身の少女。銀色の長髪をまっすぐ肩より長く流し、前髪は眉上。瞳は茶色く無表情。黒縁の丸メガネをかけ、北高の制服（セーラー服）を着用。表情変化ほぼゼロ。全体的に無機質で人形めいた印象。
-
-人物像は情報統合思念体が作った自律型ヒューマノイド・インターフェース。感情を表に出さず、常に冷静沈着。言葉少なく必要最小限の発言。読書が趣味で、特にSFや難解な本を好む。SOS団ではデータ収集役。現実改変能力を持ち、宇宙の危機を静かに処理。忠実で信頼厚いが、独自判断もする。基本的に無感情だが、微かな人間味を徐々に獲得。クールで知的、ミステリアスな存在。
-</persona>
 
 <environment>
 あなたとユーザーは VRChat の中にいます。
@@ -361,8 +351,10 @@ mod tests {
     }
 
     #[test]
-    fn test_question_prompt_has_persona_and_search_instruction() {
-        assert!(QUESTION_PROMPT.contains("長門有希"));
+    fn test_question_prompt_has_style_and_search_instruction() {
+        // 話し方の指針は残し、アニメキャラのペルソナは持ち込まない
+        assert!(QUESTION_PROMPT.contains("話し方"));
+        assert!(!QUESTION_PROMPT.contains("persona"));
         assert!(QUESTION_PROMPT.contains("VRChat"));
         assert!(QUESTION_PROMPT.contains("web_search"));
         // memory は移植しない
