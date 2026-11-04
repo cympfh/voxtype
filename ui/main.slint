@@ -224,6 +224,8 @@ export component MainWindow inherits Window {
     in-out property <float> silence-threshold: 0.03;
     in-out property <string> translate-format: "";
     in-out property <string> question-format: "";
+    // 翻訳先言語: 0=EN, 1=ZH
+    in-out property <int> translate-lang-index: 0;
 
     // --- コールバック ---
     callback start-stop();
@@ -429,6 +431,12 @@ export component MainWindow inherits Window {
                     minimum: 0.001;
                     maximum: 0.3;
                     value <=> root.silence-threshold;
+                }
+
+                Text { text: "翻訳先言語:"; }
+                ComboBox {
+                    model: ["EN", "ZH"];
+                    current-index <=> root.translate-lang-index;
                 }
 
                 Text { text: "翻訳フォーマット ({source} {translated} が使えます):"; }

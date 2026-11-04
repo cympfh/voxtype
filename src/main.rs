@@ -811,6 +811,12 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
             window.set_silence_threshold(app.config.silence_threshold);
             window.set_translate_format(app.config.translate_format.clone().into());
             window.set_question_format(app.config.question_format.clone().into());
+            // "CN" → ZH(1)、それ以外は EN(0)
+            window.set_translate_lang_index(if app.config.translate_lang_preset == "CN" {
+                1
+            } else {
+                0
+            });
             window.set_show_settings(true);
         });
     }
@@ -832,6 +838,12 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
             app.config.silence_threshold = window.get_silence_threshold();
             app.config.translate_format = window.get_translate_format().to_string();
             app.config.question_format = window.get_question_format().to_string();
+            // 0=EN, 1=ZH("CN")
+            app.config.translate_lang_preset = if window.get_translate_lang_index() == 1 {
+                "CN".to_string()
+            } else {
+                "EN".to_string()
+            };
             if let Err(e) = app.config.save() {
                 crate::log!("Failed to save config: {}", e);
             }
