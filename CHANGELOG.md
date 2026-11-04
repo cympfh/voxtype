@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - 校正 (Grok): フィラー除去・言い間違い修正をしてから出力する。オン/オフを切り替えられる
-- 質問モード (Grok): 認識結果をそのまま質問として AI に投げ、回答を出力する。Live Search (Web / X) つき
+- 質問モード (Grok): 認識結果をそのまま質問として AI に投げ、回答を出力する。Web / X の検索 (xAI Agent Tools) つき
 - 出力フォーマットを Settings から変更できる。既定は翻訳が `{source}/{translated}`、質問が `> {source}\nAI> {answer}`。プレースホルダは `{source}` `{translated}` `{answer}`
 - VR のオーバーレイに「加工」カードを追加し、校正のオン/オフとモード(エコー/翻訳/質問)を VR からも切り替えられる
 

@@ -1,10 +1,16 @@
-//! xAI (Grok) の chat completions API で校正・翻訳・質問応答を行うクライアント。
+//! xAI (Grok) API で校正・翻訳・質問応答を行うクライアント。
+//! 校正・翻訳は chat completions、質問は Responses API (Agent Tools:
+//! web_search / x_search) を使う。旧 Live Search (search_parameters) は
+//! 2026-01 に廃止された。
 //! eliza-agent-server (https://github.com/cympfh/eliza-agent-server) の
 //! TranslatorAgent / QuestionAgent を移植したもの。memory は持ち込まない。
 
 use serde::Serialize;
 
 const XAI_CHAT_URL: &str = "https://api.x.ai/v1/chat/completions";
+/// 質問モード用。サーバーサイド検索 (web_search/x_search) は
+/// Responses API (Agent Tools) でしか使えない。旧 Live Search (search_parameters) は廃止済み
+const XAI_RESPONSES_URL: &str = "https://api.x.ai/v1/responses";
 const MODEL: &str = "grok-4.7";
 /// grok-4.7 は reasoning を無効化できないので最小の low を指定する
 const REASONING_EFFORT: &str = "low";
@@ -104,24 +110,30 @@ struct ChatMessage<'a> {
 }
 
 #[derive(Serialize)]
-struct SearchSource<'a> {
-    #[serde(rename = "type")]
-    source_type: &'a str,
-}
-
-#[derive(Serialize)]
-struct SearchParameters<'a> {
-    mode: &'a str,
-    sources: Vec<SearchSource<'a>>,
-}
-
-#[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
     reasoning_effort: &'a str,
     messages: Vec<ChatMessage<'a>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    search_parameters: Option<SearchParameters<'a>>,
+}
+
+#[derive(Serialize)]
+struct Reasoning<'a> {
+    effort: &'a str,
+}
+
+#[derive(Serialize)]
+struct BuiltinTool<'a> {
+    #[serde(rename = "type")]
+    tool_type: &'a str,
+}
+
+/// Responses API (Agent Tools) のリクエスト。質問モード専用
+#[derive(Serialize)]
+struct ResponsesRequest<'a> {
+    model: &'a str,
+    reasoning: Reasoning<'a>,
+    input: Vec<ChatMessage<'a>>,
+    tools: Vec<BuiltinTool<'a>>,
 }
 
 pub struct GrokClient {
@@ -135,21 +147,92 @@ impl GrokClient {
 
     /// 校正: フィラー除去・言い間違い修正のみ。内容は変えない
     pub fn correct(&self, text: &str) -> Result<String, String> {
-        self.chat(PROOFREAD_PROMPT, text, false)
+        self.chat(PROOFREAD_PROMPT, text)
     }
 
     /// 翻訳: 翻訳元は自動判定、翻訳先は target_lang (「英語」などの表示名)
     pub fn translate(&self, target_lang: &str, text: &str) -> Result<String, String> {
         let prompt = TRANSLATE_PROMPT.replace("{target_lang}", target_lang);
-        self.chat(&prompt, text, false)
+        self.chat(&prompt, text)
     }
 
-    /// 質問: web/X の検索(Live Search)を使って答える
+    /// 質問: Responses API のサーバーサイド検索 (web_search / x_search) を使って答える
     pub fn question(&self, text: &str) -> Result<String, String> {
-        self.chat(QUESTION_PROMPT, text, true)
+        let request = ResponsesRequest {
+            model: MODEL,
+            reasoning: Reasoning {
+                effort: REASONING_EFFORT,
+            },
+            input: vec![
+                ChatMessage {
+                    role: "system",
+                    content: QUESTION_PROMPT,
+                },
+                ChatMessage {
+                    role: "user",
+                    content: text,
+                },
+            ],
+            tools: vec![
+                BuiltinTool {
+                    tool_type: "web_search",
+                },
+                BuiltinTool {
+                    tool_type: "x_search",
+                },
+            ],
+        };
+
+        // 検索が走ると時間がかかるので長めに待つ
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .unwrap_or_default();
+
+        let raw = client
+            .post(XAI_RESPONSES_URL)
+            .bearer_auth(&self.api_key)
+            .json(&request)
+            .send()
+            .map_err(|e| format!("Failed to send to xAI: {}", e))?
+            .text()
+            .map_err(|e| format!("Failed to read xAI response: {}", e))?;
+
+        let body: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("Failed to parse xAI response: {}. Body was: {}", e, raw))?;
+
+        // output[] から message アイテムの output_text を集める
+        let mut texts: Vec<&str> = Vec::new();
+        if let Some(items) = body["output"].as_array() {
+            for item in items {
+                if item["type"].as_str() != Some("message") {
+                    continue;
+                }
+                if let Some(parts) = item["content"].as_array() {
+                    for part in parts {
+                        if part["type"].as_str() == Some("output_text")
+                            && let Some(t) = part["text"].as_str()
+                        {
+                            texts.push(t);
+                        }
+                    }
+                }
+            }
+        }
+        let joined = texts.join("\n");
+        let joined = joined.trim();
+        if !joined.is_empty() {
+            return Ok(joined.to_string());
+        }
+        // 念のためトップレベルの output_text も見る
+        body["output_text"]
+            .as_str()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("xAI response had no content. Body was: {}", raw))
     }
 
-    fn chat(&self, system: &str, user: &str, live_search: bool) -> Result<String, String> {
+    fn chat(&self, system: &str, user: &str) -> Result<String, String> {
         let request = ChatRequest {
             model: MODEL,
             reasoning_effort: REASONING_EFFORT,
@@ -163,13 +246,6 @@ impl GrokClient {
                     content: user,
                 },
             ],
-            search_parameters: live_search.then(|| SearchParameters {
-                mode: "auto",
-                sources: vec![
-                    SearchSource { source_type: "web" },
-                    SearchSource { source_type: "x" },
-                ],
-            }),
         };
 
         let client = reqwest::blocking::Client::builder()
@@ -238,33 +314,47 @@ mod tests {
     }
 
     #[test]
-    fn test_request_serializes_search_parameters_only_when_live_search() {
-        let with_search = ChatRequest {
+    fn test_chat_request_serializes_model_and_effort() {
+        let request = ChatRequest {
             model: MODEL,
             reasoning_effort: REASONING_EFFORT,
             messages: vec![ChatMessage {
                 role: "user",
                 content: "hi",
             }],
-            search_parameters: Some(SearchParameters {
-                mode: "auto",
-                sources: vec![SearchSource { source_type: "web" }],
-            }),
         };
-        let json = serde_json::to_string(&with_search).unwrap();
-        assert!(json.contains("\"search_parameters\""));
-        assert!(json.contains("\"mode\":\"auto\""));
-
-        let without = ChatRequest {
-            model: MODEL,
-            reasoning_effort: REASONING_EFFORT,
-            messages: vec![],
-            search_parameters: None,
-        };
-        let json = serde_json::to_string(&without).unwrap();
-        assert!(!json.contains("search_parameters"));
+        let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"reasoning_effort\":\"low\""));
         assert!(json.contains("\"model\":\"grok-4.7\""));
+        assert!(!json.contains("search_parameters"));
+        assert!(!json.contains("tools"));
+    }
+
+    #[test]
+    fn test_responses_request_serializes_builtin_tools() {
+        let request = ResponsesRequest {
+            model: MODEL,
+            reasoning: Reasoning {
+                effort: REASONING_EFFORT,
+            },
+            input: vec![ChatMessage {
+                role: "user",
+                content: "hi",
+            }],
+            tools: vec![
+                BuiltinTool {
+                    tool_type: "web_search",
+                },
+                BuiltinTool {
+                    tool_type: "x_search",
+                },
+            ],
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"reasoning\":{\"effort\":\"low\"}"));
+        assert!(json.contains("\"type\":\"web_search\""));
+        assert!(json.contains("\"type\":\"x_search\""));
+        assert!(!json.contains("search_parameters"));
     }
 
     #[test]
