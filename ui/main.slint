@@ -316,10 +316,11 @@ export component MainWindow inherits Window {
         if show-output: VerticalBox {
             spacing: 4px;
             Text { text: "出力"; }
+            // 高さは3行分で固定。超えた分は TextEdit 内でスクロールする
             TextEdit {
                 text: output-text;
                 read-only: true;
-                min-height: 64px;
+                height: 76px;
             }
         }
 
