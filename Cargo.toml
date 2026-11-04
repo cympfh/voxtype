@@ -17,6 +17,7 @@ dirs = "5.0"
 arboard = "3.3"
 enigo = "0.6.1"
 rosc = "0.10"
+chrono = "0.4.45"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

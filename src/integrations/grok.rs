@@ -156,8 +156,13 @@ impl GrokClient {
         self.chat(&prompt, text)
     }
 
-    /// 質問: Responses API のサーバーサイド検索 (web_search / x_search) を使って答える
+    /// 質問: Responses API のサーバーサイドツール (web_search / x_search /
+    /// code_execution) を使って答える。eliza-agent-server の QuestionAgent と
+    /// 同じく、現在日時 (JST) を system メッセージで添える
     pub fn question(&self, text: &str) -> Result<String, String> {
+        let now =
+            chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(9 * 3600).unwrap());
+        let now_message = format!("現在の日時（JST）: {}", now.format("%Y-%m-%d %H:%M:%S"));
         let request = ResponsesRequest {
             model: MODEL,
             reasoning: Reasoning {
@@ -167,6 +172,10 @@ impl GrokClient {
                 ChatMessage {
                     role: "system",
                     content: QUESTION_PROMPT,
+                },
+                ChatMessage {
+                    role: "system",
+                    content: &now_message,
                 },
                 ChatMessage {
                     role: "user",
@@ -179,6 +188,9 @@ impl GrokClient {
                 },
                 BuiltinTool {
                     tool_type: "x_search",
+                },
+                BuiltinTool {
+                    tool_type: "code_execution",
                 },
             ],
         };
