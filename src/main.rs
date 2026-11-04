@@ -602,10 +602,18 @@ impl eframe::App for App {
                     );
 
                     ui.add_space(10.0);
-                    ui.label("翻訳フォーマット ({source} {translated}):");
-                    ui.text_edit_singleline(&mut self.config.translate_format);
-                    ui.label("質問フォーマット ({source} {answer}):");
-                    ui.text_edit_singleline(&mut self.config.question_format);
+                    ui.label("翻訳フォーマット ({source} {translated} が使えます):");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.config.translate_format)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.label("質問フォーマット ({source} {answer} が使えます):");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.config.question_format)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
 
                     ui.add_space(10.0);
                     ui.separator();
