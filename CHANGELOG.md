@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - voxtype のアイコン (assets/voxtype.svg / voxtype.png)。README の冒頭に vrc-companion のロゴと並べた
 - 録音開始/停止のグローバルショートカットキー (既定 F9)。設定ページで変更できる。空欄にすると無効
-- 設定ページで翻訳先言語を EN/ZH から選べるようになった
+- 翻訳先言語の候補リスト。設定ページで `/` 区切りで編集する (既定 `ZH/EN`、先頭が初期選択)。メイン画面はその候補から選ぶプルダウンのみ
 
 ## [0.7.0] - 2026-11-04
 

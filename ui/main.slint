@@ -213,8 +213,9 @@ export component MainWindow inherits Window {
     in-out property <bool> vrchat-enabled: false;
     in-out property <bool> proofread-enabled: false;
     in-out property <int> mode: 0;
-    in-out property <string> lang-preset: "EN";       // "EN" | "CN" | "CUSTOM"
-    in-out property <string> lang-custom: "";
+    // 翻訳先言語の候補(設定ページで編集)と現在の選択
+    in property <[string]> lang-list: [];
+    in-out property <string> lang-selected: "";
 
     // --- 設定ページ ---
     in-out property <bool> show-settings: false;
@@ -225,8 +226,8 @@ export component MainWindow inherits Window {
     in-out property <float> silence-threshold: 0.03;
     in-out property <string> translate-format: "";
     in-out property <string> question-format: "";
-    // 翻訳先言語: 0=EN, 1=ZH
-    in-out property <int> translate-lang-index: 0;
+    // 翻訳先言語の候補リスト(設定ページの編集用、`/` 区切りテキスト)
+    in-out property <string> translate-langs-text: "";
     // 録音開始/停止のグローバルショートカットキー(空で無効)
     in-out property <string> shortcut-key: "";
 
@@ -238,8 +239,7 @@ export component MainWindow inherits Window {
     callback toggle-vrchat(bool);
     callback toggle-proofread(bool);
     callback set-mode(int);
-    callback set-lang-preset(string);
-    callback lang-custom-edited(string);
+    callback set-lang-selected(string);
     callback call-qvpen();
     callback open-settings();
     callback save-settings();
@@ -373,17 +373,10 @@ export component MainWindow inherits Window {
                     padding-left: 16px;
                     Text { text: "翻訳先言語:"; vertical-alignment: center; }
                     ComboBox {
-                        model: ["EN", "CN", "自由記述"];
-                        current-value: lang-preset == "CUSTOM" ? "自由記述" : lang-preset;
-                        selected(v) => {
-                            root.set-lang-preset(v == "自由記述" ? "CUSTOM" : v);
-                        }
+                        model: root.lang-list;
+                        current-value <=> root.lang-selected;
+                        selected(v) => { root.set-lang-selected(v); }
                     }
-                }
-                if mode == 1 && lang-preset == "CUSTOM": LineEdit {
-                    text <=> root.lang-custom;
-                    placeholder-text: "翻訳先の言語 (例: 韓国語)";
-                    edited(t) => { root.lang-custom-edited(t); }
                 }
             }
         }
@@ -442,10 +435,10 @@ export component MainWindow inherits Window {
                     placeholder-text: "例: F9, Ctrl+Shift+R";
                 }
 
-                Text { text: "翻訳先言語:"; }
-                ComboBox {
-                    model: ["EN", "ZH"];
-                    current-index <=> root.translate-lang-index;
+                Text { text: "翻訳先言語の候補 (/ 区切り、先頭が初期選択):"; }
+                LineEdit {
+                    text <=> root.translate-langs-text;
+                    placeholder-text: "例: ZH/EN";
                 }
 
                 Text { text: "翻訳フォーマット ({source} {translated} が使えます):"; }

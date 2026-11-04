@@ -614,8 +614,15 @@ impl App {
             Mode::Translate => 1,
             Mode::Question => 2,
         });
-        window.set_lang_preset(self.config.translate_lang_preset.clone().into());
-        window.set_lang_custom(self.config.translate_lang_custom.clone().into());
+        let langs: Vec<slint::SharedString> = self
+            .config
+            .translate_langs
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect();
+        window.set_lang_list(slint::ModelRc::new(slint::VecModel::from(langs)));
+        window.set_lang_selected(self.config.translate_lang_selected.clone().into());
     }
 
     /// 状態 → UI(表示物)。毎 tick 呼ぶ
@@ -832,21 +839,11 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
     {
         let app = app.clone();
         let weak = window.as_weak();
-        window.on_set_lang_preset(move |preset| {
+        window.on_set_lang_selected(move |lang| {
             let Some(window) = weak.upgrade() else { return };
             let mut app = app.borrow_mut();
-            app.config.translate_lang_preset = preset.to_string();
+            app.config.translate_lang_selected = lang.to_string();
             app.persist_and_push(&window);
-        });
-    }
-    {
-        let app = app.clone();
-        window.on_lang_custom_edited(move |text| {
-            let mut app = app.borrow_mut();
-            app.config.translate_lang_custom = text.to_string();
-            if let Err(e) = app.config.save() {
-                crate::log!("Failed to save config: {}", e);
-            }
         });
     }
     {
@@ -871,12 +868,7 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
             window.set_silence_threshold(app.config.silence_threshold);
             window.set_translate_format(app.config.translate_format.clone().into());
             window.set_question_format(app.config.question_format.clone().into());
-            // "CN" → ZH(1)、それ以外は EN(0)
-            window.set_translate_lang_index(if app.config.translate_lang_preset == "CN" {
-                1
-            } else {
-                0
-            });
+            window.set_translate_langs_text(app.config.translate_langs.join("/").into());
             window.set_shortcut_key(app.config.shortcut_key.clone().into());
             window.set_show_settings(true);
         });
@@ -899,18 +891,22 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
             app.config.silence_threshold = window.get_silence_threshold();
             app.config.translate_format = window.get_translate_format().to_string();
             app.config.question_format = window.get_question_format().to_string();
-            // 0=EN, 1=ZH("CN")
-            app.config.translate_lang_preset = if window.get_translate_lang_index() == 1 {
-                "CN".to_string()
-            } else {
-                "EN".to_string()
-            };
+            app.config.translate_langs =
+                crate::config::parse_translate_langs(&window.get_translate_langs_text());
+            if !app
+                .config
+                .translate_langs
+                .contains(&app.config.translate_lang_selected)
+            {
+                app.config.translate_lang_selected = app.config.translate_langs[0].clone();
+            }
             app.config.shortcut_key = window.get_shortcut_key().trim().to_string();
             app.register_shortcut();
             if let Err(e) = app.config.save() {
                 crate::log!("Failed to save config: {}", e);
             }
             app.push_steamvr_snapshot();
+            app.sync_config_to_ui(&window);
             window.set_show_settings(false);
         });
     }
