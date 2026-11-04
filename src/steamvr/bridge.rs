@@ -105,7 +105,7 @@ pub fn overlay_fields(snapshot: &OverlaySnapshot) -> Vec<OverlayField> {
             action: OverlayAction::ToggleVrchat,
         },
         OverlayField {
-            label: "校正 (Grok)",
+            label: "校正",
             enabled: snapshot.proofread_enabled,
             indent: false,
             action: OverlayAction::ToggleProofread,
@@ -333,7 +333,7 @@ mod tests {
                 OverlayAction::ToggleAutoInputSendEnter,
             ),
             ("Input to VRChat", false, OverlayAction::ToggleVrchat),
-            ("校正 (Grok)", false, OverlayAction::ToggleProofread),
+            ("校正", false, OverlayAction::ToggleProofread),
             (
                 "エコー（そのまま）",
                 false,

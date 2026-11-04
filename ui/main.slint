@@ -351,7 +351,7 @@ export component MainWindow inherits Window {
                 spacing: 6px;
                 padding-left: 8px;
                 CheckBox {
-                    text: "校正 (Grok): フィラー除去・言い間違い修正";
+                    text: "校正: フィラー除去・言い間違い修正";
                     checked <=> root.proofread-enabled;
                     toggled => { root.toggle-proofread(self.checked); }
                 }
