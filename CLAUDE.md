@@ -31,30 +31,27 @@ SteamVR overlay / OpenVR FFI / WGL code is `#[cfg(windows)]`. Host `cargo test` 
 Single-window `eframe`/`egui` immediate-mode app. All mutable state lives in the `App` struct in `src/main.rs`; `App::update()` runs every frame and does two things before drawing: drains any pending channel messages, then renders. There is no separate event loop or message dispatcher — cross-thread communication is entirely channel-based:
 
 - `transcription_receiver` (`tokio::mpsc`): partial/success/error events streamed from the STT websocket task, running on its own `tokio::runtime::Runtime` spawned per recording session (`App::start_streaming_transcription`) and shut down (`rt.shutdown_background()`) once transcription completes or errors.
-- `eliza_response_receiver` (`std::sync::mpsc`): Eliza HTTP call runs on a plain spawned thread (`eliza::ElizaClient::send_chat` is blocking `reqwest`), result polled once per frame.
-- `translate_response_receiver` (`std::sync::mpsc`): same pattern as Eliza, for `ElizaClient::translate` (`/eliza/api/translate`). Independent endpoint from chat.
+- `process_receiver` (`std::sync::mpsc`): Grok HTTP call (correct/translate/question, `integrations::grok::GrokClient`, blocking `reqwest`) runs on a plain spawned thread, result polled once per frame.
 - SteamVR overlay (`OverlayHandle`): `snapshot_tx` (App → overlay thread) and `action_rx` (overlay thread → App). See below.
 
 ### Data flow per utterance
 
 1. `AudioRecorder` (`src/audio/mod.rs`) captures mic input via `cpal`, downmixes to mono, chunks into ~100ms `Vec<f32>` buffers pushed through an unbounded channel, and independently tracks silence duration + peak amplitude for the UI meter. Recording auto-stops when `is_silent(silence_duration_secs)` goes true (checked every frame while recording), with a 3s grace period after start.
 2. `SpeechToTextClient::stream_transcribe` (`src/audio/speech_to_text.rs`) owns the xAI STT websocket (`wss://api.x.ai/v1/stt`) for the session: waits for `transcript.created`, streams PCM16 audio frames as they arrive, sends `audio.done` once the audio channel closes (recording stopped), and forwards `transcript.partial`/`transcript.done` events back as `TranscriptionMessage`.
-3. On `TranscriptionMessage::Success`, `App::on_transcription_success` fans the text out to whichever sinks are enabled in `Config`: clipboard (`arboard`), VRChat OSC (`integrations::vrchat`), Eliza chat (`integrations::eliza`, on its own thread), auto-translate (`ElizaClient::translate`, on its own thread), and/or active-window auto-input (`integrations::auto_input`, via `enigo`).
-4. If Eliza is enabled and its response later arrives, and `eliza_response_to_vrchat_enabled` is set, the response is sent to VRChat independently of whatever triggered the original message — Eliza's send path is decoupled from the user-message VRChat toggle by design (see TODO.md's "機能変更" entry — this was a deliberate fix, don't re-couple them).
-5. If auto-translate is enabled, the original text is still sent to VRChat immediately (gated by `vrchat_enabled`); when the translation arrives, `{original} / {translated}` is sent to VRChat independently of `vrchat_enabled` (same decouple pattern as Eliza).
+3. On `TranscriptionMessage::Success`, `App::on_transcription_success` runs the processing pipeline: optional proofread (Grok correct) → mode (`Echo` as-is / `Translate` via Grok / `Question` via Grok with Live Search) → output format template (`{source}` `{translated}` `{answer}` placeholders). Echo without proofread dispatches synchronously; anything needing Grok runs on a spawned thread and the formatted result lands via `process_receiver`. On Grok failure the raw text is dispatched as-is.
+4. `App::dispatch_output` sends the final text to whichever sinks are enabled in `Config`: clipboard (`arboard`), VRChat OSC (`integrations::vrchat`), and/or active-window auto-input (`integrations::auto_input`, via `enigo`).
 
 ### Config invariants (`src/config.rs`)
 
-Two independent exclusive pairs — only ever flip them via the exclusive helpers, which force the other off:
+One exclusive pair — only ever flip them via the exclusive helpers, which force the other off:
 
 - `auto_input_enabled` ↔ `vrchat_enabled` via `enable_auto_input_exclusive()` / `enable_vrchat_exclusive()`
-- `eliza_enabled` ↔ `auto_translate_enabled` via `enable_eliza_exclusive()` / `enable_auto_translate_exclusive()`
 
-`eliza_response_to_vrchat_enabled` is independent of `vrchat_enabled`. Config is a flat JSON struct persisted at the OS config dir (`~/.config/vrc-companion/config.json` on Linux) via `Config::load`/`Config::save`; every field has a `#[serde(default = ...)]` so old config files never fail to deserialize when new fields are added — keep that pattern when adding settings.
+`proofread_enabled` and `mode` (`Echo`/`Translate`/`Question`) are independent of the sink toggles. Config is a flat JSON struct persisted at the OS config dir (`~/.config/vrc-companion/config.json` on Linux) via `Config::load`/`Config::save`; every field has a `#[serde(default = ...)]` so old config files never fail to deserialize when new fields are added — keep that pattern when adding settings. `migrate_and_parse` drops removed keys (`eliza_*`) and maps the old `auto_translate_enabled: true` to `mode = "translate"`.
 
 ### SteamVR overlay (`src/steamvr/`)
 
-Desktop GUI stays; a SteamVR **dashboard overlay** mirrors the operational controls (checkboxes, Start/Stop, QvPen, last transcription / Eliza / translation text). Settings stay on the desktop window only.
+Desktop GUI stays; a SteamVR **dashboard overlay** mirrors the operational controls (checkboxes, Start/Stop, QvPen, proofread toggle, mode selection, last transcription / output text). Settings stay on the desktop window only.
 
 **Why custom FFI, not the `openvr` / `ovr_overlay` crates:** the official C++ SDK (and crates wrapping it) uses the MSVC vtable ABI, which is incompatible with this project's cross-compile target `x86_64-pc-windows-gnu`. Instead we `libloading`-load `openvr_api.dll` and call `VR_GetGenericInterface("FnTable:IVROverlay_028", ...)` / `"FnTable:IVRApplications_008"` / `"FnTable:IVRInput_011"` for ABI-safe function-pointer tables. Field order/count is ABI-critical and transcribed verbatim from [openvr_capi.h](https://github.com/ValveSoftware/openvr/blob/master/headers/openvr_capi.h); unused slots are `PlaceholderFn`. Tripwire tests lock table field counts and struct sizes.
 
@@ -83,7 +80,7 @@ The overlay renderer has its **own** `egui::Context` and must load `fonts/NotoSa
 ### Module layout
 
 - `src/audio/` — mic capture + STT client (things that touch raw audio samples)
-- `src/integrations/` — everything that talks to an external system by sending already-transcribed text (VRChat OSC, Eliza HTTP, OS-level auto-input/QvPen via `enigo`/`windows-sys`)
+- `src/integrations/` — everything that talks to an external system by sending already-transcribed text (VRChat OSC, Grok HTTP via `grok.rs`, OS-level auto-input/QvPen via `enigo`/`windows-sys`)
 - `src/steamvr/` — SteamVR dashboard overlay
   - `bridge.rs` — all OS: `OverlaySnapshot` / `OverlayAction` / `OverlayHandle` / `start()` (non-Windows always `None`) / `overlay_fields()`
   - `ffi.rs` — `#[cfg(windows)]`: raw OpenVR C API tables
@@ -103,6 +100,5 @@ Windows-gated types/fns that are only constructed from `#[cfg(windows)]` code (`
 
 ## Process notes
 
-- Development follows TDD (see TODO.md) — tests are colocated with the code they cover (`#[cfg(test)] mod tests` at the bottom of each file), not in a separate test tree.
-- TODO.md is the running dev log for this project (checkboxes with completion timestamps + notes on what was actually done/decided) — check it for the rationale behind recent changes before assuming something is unfinished or accidental. SteamVR Stage 1–4 plus overlay UI follow-ups and the AFK-toggle revert live there.
+- Development follows TDD — tests are colocated with the code they cover (`#[cfg(test)] mod tests` at the bottom of each file), not in a separate test tree.
 - AFK toggle (`/input/AFKToggle`) was implemented, found unsupported on hardware, and **fully removed** on user instruction. Do not re-add it.

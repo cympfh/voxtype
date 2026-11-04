@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 
-use crate::config::Config;
+use crate::config::{Config, Mode};
 
 /// デスクトップ GUI 側の Config から VR オーバーレイ描画スレッドへ送るスナップショット。
 #[derive(Debug, Clone, PartialEq)]
@@ -11,13 +11,14 @@ pub struct OverlaySnapshot {
     pub auto_input_enabled: bool,
     pub auto_input_send_enter: bool,
     pub vrchat_enabled: bool,
-    pub eliza_enabled: bool,
-    pub eliza_response_to_vrchat_enabled: bool,
-    pub auto_translate_enabled: bool,
+    /// 校正(Grok)の ON/OFF
+    pub proofread_enabled: bool,
+    /// 加工モード(エコー/翻訳/質問)
+    pub mode: Mode,
     pub is_recording: bool,
     pub last_transcription: String,
-    pub last_eliza_response: String,
-    pub last_translated_response: String,
+    /// 加工後の出力(フォーマット済み。未加工なら認識結果そのまま)
+    pub last_output: String,
     /// 右端の A/B/X/Y ボタン
     pub avatar_buttons: [AvatarButtonView; 4],
 }
@@ -41,8 +42,7 @@ impl OverlaySnapshot {
         config: &Config,
         is_recording: bool,
         last_transcription: &str,
-        last_eliza_response: &str,
-        last_translated_response: &str,
+        last_output: &str,
         avatar_states: &crate::avatar_buttons::ToggleStates,
     ) -> Self {
         Self {
@@ -50,13 +50,11 @@ impl OverlaySnapshot {
             auto_input_enabled: config.auto_input_enabled,
             auto_input_send_enter: config.auto_input_send_enter,
             vrchat_enabled: config.vrchat_enabled,
-            eliza_enabled: config.eliza_enabled,
-            eliza_response_to_vrchat_enabled: config.eliza_response_to_vrchat_enabled,
-            auto_translate_enabled: config.auto_translate_enabled,
+            proofread_enabled: config.proofread_enabled,
+            mode: config.mode,
             is_recording,
             last_transcription: last_transcription.to_string(),
-            last_eliza_response: last_eliza_response.to_string(),
-            last_translated_response: last_translated_response.to_string(),
+            last_output: last_output.to_string(),
             avatar_buttons: std::array::from_fn(|i| {
                 let b = &config.avatar_buttons[i];
                 AvatarButtonView {
@@ -78,6 +76,7 @@ pub struct OverlayField {
 }
 
 /// デスクトップGUIのチェックボックス群と対応するオーバーレイ表示用フィールド一覧を返す。
+/// 先頭4つが「送り先」カード、残りが「加工」カード。
 /// 純粋関数なので全OSでテスト可能。
 pub fn overlay_fields(snapshot: &OverlaySnapshot) -> Vec<OverlayField> {
     vec![
@@ -106,22 +105,28 @@ pub fn overlay_fields(snapshot: &OverlaySnapshot) -> Vec<OverlayField> {
             action: OverlayAction::ToggleVrchat,
         },
         OverlayField {
-            label: "自動翻訳 by Eliza",
-            enabled: snapshot.auto_translate_enabled,
+            label: "校正 (Grok)",
+            enabled: snapshot.proofread_enabled,
             indent: false,
-            action: OverlayAction::ToggleAutoTranslate,
+            action: OverlayAction::ToggleProofread,
         },
         OverlayField {
-            label: "お話 with Eliza",
-            enabled: snapshot.eliza_enabled,
+            label: "エコー（そのまま）",
+            enabled: snapshot.mode == Mode::Echo,
             indent: false,
-            action: OverlayAction::ToggleEliza,
+            action: OverlayAction::SetMode(Mode::Echo),
         },
         OverlayField {
-            label: "Send Eliza's response to VRChat",
-            enabled: snapshot.eliza_response_to_vrchat_enabled,
-            indent: true,
-            action: OverlayAction::ToggleElizaResponseToVrchat,
+            label: "翻訳",
+            enabled: snapshot.mode == Mode::Translate,
+            indent: false,
+            action: OverlayAction::SetMode(Mode::Translate),
+        },
+        OverlayField {
+            label: "質問 (AI)",
+            enabled: snapshot.mode == Mode::Question,
+            indent: false,
+            action: OverlayAction::SetMode(Mode::Question),
         },
     ]
 }
@@ -139,9 +144,10 @@ pub enum OverlayAction {
     ToggleAutoInput,
     ToggleAutoInputSendEnter,
     ToggleVrchat,
-    ToggleEliza,
-    ToggleElizaResponseToVrchat,
-    ToggleAutoTranslate,
+    /// 校正(Grok)の ON/OFF
+    ToggleProofread,
+    /// 加工モードを切り替える(エコー/翻訳/質問)
+    SetMode(Mode),
     CallQvPen,
     ToggleRecording,
     /// 録音していなければ開始する(SteamVR のボタン割り当て「録音を開始」)
@@ -241,21 +247,21 @@ mod tests {
 
     #[test]
     fn test_overlay_snapshot_from_config_copies_all_fields() {
-        let mut config = Config::default();
-        config.clipboard_enabled = false;
-        config.auto_input_enabled = true;
-        config.auto_input_send_enter = true;
-        config.vrchat_enabled = false;
-        config.eliza_enabled = true;
-        config.eliza_response_to_vrchat_enabled = true;
-        config.auto_translate_enabled = false;
+        let config = Config {
+            clipboard_enabled: false,
+            auto_input_enabled: true,
+            auto_input_send_enter: true,
+            vrchat_enabled: false,
+            proofread_enabled: true,
+            mode: Mode::Translate,
+            ..Default::default()
+        };
 
         let snapshot = OverlaySnapshot::from_config(
             &config,
             true,
             "こんにちは",
-            "Eliza応答",
-            "translated",
+            "こんにちは/Hello",
             &Default::default(),
         );
 
@@ -263,33 +269,19 @@ mod tests {
         assert_eq!(snapshot.auto_input_enabled, config.auto_input_enabled);
         assert_eq!(snapshot.auto_input_send_enter, config.auto_input_send_enter);
         assert_eq!(snapshot.vrchat_enabled, config.vrchat_enabled);
-        assert_eq!(snapshot.eliza_enabled, config.eliza_enabled);
-        assert_eq!(
-            snapshot.eliza_response_to_vrchat_enabled,
-            config.eliza_response_to_vrchat_enabled
-        );
-        assert_eq!(
-            snapshot.auto_translate_enabled,
-            config.auto_translate_enabled
-        );
+        assert_eq!(snapshot.proofread_enabled, config.proofread_enabled);
+        assert_eq!(snapshot.mode, config.mode);
         assert!(snapshot.is_recording);
         assert_eq!(snapshot.last_transcription, "こんにちは");
-        assert_eq!(snapshot.last_eliza_response, "Eliza応答");
-        assert_eq!(snapshot.last_translated_response, "translated");
+        assert_eq!(snapshot.last_output, "こんにちは/Hello");
     }
 
     // Windows では本物の見張りスレッドが動き、SteamVR が起動していればつないでしまうので呼ばない
     #[cfg(not(windows))]
     #[test]
     fn test_start_is_none_off_windows() {
-        let snapshot = OverlaySnapshot::from_config(
-            &Config::default(),
-            false,
-            "",
-            "",
-            "",
-            &Default::default(),
-        );
+        let snapshot =
+            OverlaySnapshot::from_config(&Config::default(), false, "", "", &Default::default());
         assert!(start(snapshot, 2.4, egui::Context::default()).is_none());
     }
 
@@ -299,13 +291,11 @@ mod tests {
             auto_input_enabled: false,
             auto_input_send_enter: false,
             vrchat_enabled: false,
-            eliza_enabled: false,
-            eliza_response_to_vrchat_enabled: false,
-            auto_translate_enabled: false,
+            proofread_enabled: false,
+            mode: Mode::Echo,
             is_recording: false,
             last_transcription: String::new(),
-            last_eliza_response: String::new(),
-            last_translated_response: String::new(),
+            last_output: String::new(),
             avatar_buttons: Default::default(),
         }
     }
@@ -324,7 +314,6 @@ mod tests {
         let s = OverlaySnapshot::from_config(
             &config,
             false,
-            "",
             "",
             "",
             &ToggleStates([true, true, false, false]),
@@ -356,17 +345,14 @@ mod tests {
                 OverlayAction::ToggleAutoInputSendEnter,
             ),
             ("Input to VRChat", false, OverlayAction::ToggleVrchat),
+            ("校正 (Grok)", false, OverlayAction::ToggleProofread),
             (
-                "自動翻訳 by Eliza",
+                "エコー（そのまま）",
                 false,
-                OverlayAction::ToggleAutoTranslate,
+                OverlayAction::SetMode(Mode::Echo),
             ),
-            ("お話 with Eliza", false, OverlayAction::ToggleEliza),
-            (
-                "Send Eliza's response to VRChat",
-                true,
-                OverlayAction::ToggleElizaResponseToVrchat,
-            ),
+            ("翻訳", false, OverlayAction::SetMode(Mode::Translate)),
+            ("質問 (AI)", false, OverlayAction::SetMode(Mode::Question)),
         ];
         assert_eq!(fields.len(), expected.len());
         for (field, (label, indent, action)) in fields.iter().zip(expected.iter()) {
@@ -377,28 +363,46 @@ mod tests {
     }
 
     #[test]
-    fn test_overlay_fields_reflects_each_snapshot_flag_independently() {
+    fn test_overlay_fields_reflects_each_toggle_flag_independently() {
         let setters: Vec<(fn(&mut OverlaySnapshot), usize)> = vec![
             (|s| s.clipboard_enabled = true, 0),
             (|s| s.auto_input_enabled = true, 1),
             (|s| s.auto_input_send_enter = true, 2),
             (|s| s.vrchat_enabled = true, 3),
-            (|s| s.auto_translate_enabled = true, 4),
-            (|s| s.eliza_enabled = true, 5),
-            (|s| s.eliza_response_to_vrchat_enabled = true, 6),
+            (|s| s.proofread_enabled = true, 4),
         ];
 
+        // モードの3行(5〜7)は別テスト(test_overlay_fields_mode_is_radio)で確かめる
         for (set_flag, expected_index) in setters {
             let mut snapshot = all_false_snapshot();
             set_flag(&mut snapshot);
             let fields = overlay_fields(&snapshot);
-            for (i, field) in fields.iter().enumerate() {
+            for (i, field) in fields.iter().enumerate().take(5) {
                 assert_eq!(
                     field.enabled,
                     i == expected_index,
                     "index {} の enabled が意図しない値: {:?}",
                     i,
                     field.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_overlay_fields_mode_is_radio() {
+        // モードの3行は今のモードだけが ON になる
+        for (mode, on_index) in [(Mode::Echo, 5), (Mode::Translate, 6), (Mode::Question, 7)] {
+            let mut snapshot = all_false_snapshot();
+            snapshot.mode = mode;
+            let fields = overlay_fields(&snapshot);
+            for (i, field) in fields.iter().enumerate().skip(5) {
+                assert_eq!(
+                    field.enabled,
+                    i == on_index,
+                    "mode {:?} の index {}",
+                    mode,
+                    i
                 );
             }
         }

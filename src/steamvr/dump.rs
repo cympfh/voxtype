@@ -14,14 +14,12 @@ fn samples() -> Vec<(&'static str, OverlaySnapshot)> {
         auto_input_enabled: false,
         auto_input_send_enter: true,
         vrchat_enabled: true,
-        eliza_enabled: false,
-        eliza_response_to_vrchat_enabled: true,
-        auto_translate_enabled: true,
+        proofread_enabled: true,
+        mode: crate::config::Mode::Translate,
         is_recording: false,
         last_transcription: "こんにちは、今日はいい天気ですね。あとでワールド巡りしませんか？"
             .to_string(),
-        last_eliza_response: String::new(),
-        last_translated_response: "Hello, nice weather today. Want to go world hopping later?"
+        last_output: "こんにちは、今日はいい天気ですね。あとでワールド巡りしませんか？/Hello, nice weather today. Want to go world hopping later?"
             .to_string(),
         // A オン、B・X オフ、Y 未設定
         avatar_buttons: std::array::from_fn(|i| AvatarButtonView {
@@ -31,11 +29,11 @@ fn samples() -> Vec<(&'static str, OverlaySnapshot)> {
     };
     let recording = OverlaySnapshot {
         is_recording: true,
-        auto_translate_enabled: false,
-        eliza_enabled: true,
+        mode: crate::config::Mode::Question,
         last_transcription: "おすすめのワールドある？".to_string(),
-        last_eliza_response: "星空がきれいな展望台のワールドはどうでしょう 🌙".to_string(),
-        last_translated_response: String::new(),
+        last_output:
+            "> おすすめのワールドある？\nAI> 星空がきれいな展望台のワールドはどうでしょう 🌙"
+                .to_string(),
         ..base.clone()
     };
     vec![("idle", base), ("recording", recording)]

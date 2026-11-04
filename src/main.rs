@@ -10,9 +10,9 @@ mod steamvr;
 use audio::AudioRecorder;
 use audio::speech_to_text::SpeechToTextClient;
 use avatar_buttons::{AvatarButton, LABELS, ParamType, ToggleStates};
-use config::Config;
+use config::{Config, Mode};
 use eframe::egui;
-use integrations::{auto_input, eliza, vrchat};
+use integrations::{auto_input, grok, vrchat};
 use std::sync::mpsc::{Receiver, channel};
 use steamvr::{OverlayAction, OverlayHandle, OverlaySnapshot};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -67,9 +67,6 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-const USER_PREFIX: &str = "> ";
-const ELIZA_PREFIX: &str = "AI> ";
-
 pub enum TranscriptionMessage {
     Partial(String),
     Success(String),
@@ -82,14 +79,14 @@ struct App {
     is_transcribing: bool,
     audio_recorder: Option<AudioRecorder>,
     transcribed_text: String,
-    eliza_response: String,
-    translated_response: String,
+    /// 加工後の出力(フォーマット済み。未加工なら認識結果そのまま)
+    processed_output: String,
     status_message: String,
 
     transcription_receiver: Option<UnboundedReceiver<TranscriptionMessage>>,
     tokio_runtime: Option<tokio::runtime::Runtime>,
-    eliza_response_receiver: Option<Receiver<Result<String, String>>>,
-    translate_response_receiver: Option<Receiver<Result<(String, String), String>>>,
+    /// Grok の加工(校正/翻訳/質問)の結果を受け取る
+    process_receiver: Option<Receiver<Result<String, String>>>,
     steamvr_overlay: Option<OverlayHandle>,
 
     show_settings: bool,
@@ -98,7 +95,6 @@ struct App {
     /// A/B/X/Y の設定の窓。開いている間の書きかけ
     avatar_draft: Option<[AvatarButton; 4]>,
     settings_xai_api_key: String,
-    settings_eliza_url: String,
 
     available_devices: Vec<String>,
     selected_device_index: usize,
@@ -119,26 +115,23 @@ impl App {
             .unwrap_or(0);
 
         let steamvr_overlay = steamvr::start(
-            OverlaySnapshot::from_config(&config, false, "", "", "", &ToggleStates::default()),
+            OverlaySnapshot::from_config(&config, false, "", "", &ToggleStates::default()),
             config.steamvr_overlay_width_m,
             egui_ctx,
         );
 
         Self {
             settings_xai_api_key: config.xai_api_key.clone(),
-            settings_eliza_url: config.eliza_url.clone(),
             config,
             is_recording: false,
             is_transcribing: false,
             audio_recorder: None,
             transcribed_text: String::new(),
-            eliza_response: String::new(),
-            translated_response: String::new(),
+            processed_output: String::new(),
             status_message: String::new(),
             transcription_receiver: None,
             tokio_runtime: None,
-            eliza_response_receiver: None,
-            translate_response_receiver: None,
+            process_receiver: None,
             steamvr_overlay,
             show_settings: false,
             avatar_states: ToggleStates::default(),
@@ -234,48 +227,88 @@ impl App {
         self.tokio_runtime = Some(rt);
     }
 
+    /// 加工が必要か。質問モードに校正はかけない(質問のプロンプトが音声認識ノイズを前提にしているため)
+    fn needs_llm(&self) -> bool {
+        (self.config.proofread_enabled && self.config.mode != Mode::Question)
+            || self.config.mode != Mode::Echo
+    }
+
     fn on_transcription_success(&mut self, text: String) {
         self.transcribed_text = text.clone();
+        self.status_message = "Transcription completed!".to_string();
+        self.is_transcribing = false;
+        self.transcription_receiver = None;
+        if let Some(rt) = self.tokio_runtime.take() {
+            rt.shutdown_background();
+        }
 
+        if text.is_empty() || !self.needs_llm() {
+            self.processed_output = text.clone();
+            self.dispatch_output(&text);
+        } else if self.config.xai_api_key.is_empty() {
+            crate::log!("xAI API key が無いので加工をスキップしてそのまま出力する");
+            self.status_message = "⚠ xAI API key 未設定。加工せず出力しました".to_string();
+            self.processed_output = text.clone();
+            self.dispatch_output(&text);
+        } else {
+            let api_key = self.config.xai_api_key.clone();
+            let mode = self.config.mode;
+            let proofread = self.config.proofread_enabled;
+            let target_lang = self.config.translate_target_lang();
+            let translate_format = self.config.translate_format.clone();
+            let question_format = self.config.question_format.clone();
+            let raw = text;
+            let (tx, rx) = channel::<Result<String, String>>();
+            std::thread::spawn(move || {
+                let result = (|| {
+                    let client = grok::GrokClient::new(api_key);
+                    match mode {
+                        // 校正のみ
+                        Mode::Echo => client.correct(&raw),
+                        Mode::Translate => {
+                            let source = if proofread {
+                                client.correct(&raw)?
+                            } else {
+                                raw
+                            };
+                            let translated = client.translate(&target_lang, &source)?;
+                            Ok(grok::render_template(
+                                &translate_format,
+                                &source,
+                                &translated,
+                                "",
+                            ))
+                        }
+                        Mode::Question => {
+                            let answer = client.question(&raw)?;
+                            Ok(grok::render_template(&question_format, &raw, "", &answer))
+                        }
+                    }
+                })();
+                let _ = tx.send(result);
+            });
+            self.process_receiver = Some(rx);
+            self.status_message = "Grok で処理中...".to_string();
+        }
+        self.push_steamvr_snapshot();
+    }
+
+    /// 出力先へ送る(クリップボード / アクティブウィンドウ / VRChat)
+    fn dispatch_output(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
         if self.config.clipboard_enabled
             && let Ok(mut clipboard) = arboard::Clipboard::new()
         {
-            let _ = clipboard.set_text(&text);
+            let _ = clipboard.set_text(text);
         }
-
-        if self.config.vrchat_enabled && !text.is_empty() {
+        if self.config.vrchat_enabled {
             let client = vrchat::VRChatClient::new();
-            if let Err(e) = client.send_message(&format!("{}{}", USER_PREFIX, text)) {
+            if let Err(e) = client.send_message(text) {
                 crate::log!("VRChat OSC error: {}", e);
             }
         }
-
-        if self.config.eliza_enabled && !text.is_empty() {
-            let eliza_url = self.config.eliza_url.clone();
-            let eliza_text = text.clone();
-            let (tx, rx) = channel::<Result<String, String>>();
-            std::thread::spawn(move || {
-                let client = eliza::ElizaClient::new(eliza_url);
-                let _ = tx.send(client.send_chat(&eliza_text));
-            });
-            self.eliza_response_receiver = Some(rx);
-        }
-
-        if self.config.auto_translate_enabled && !text.is_empty() {
-            let eliza_url = self.config.eliza_url.clone();
-            let target_lang = self.config.translate_target_lang();
-            let source_text = text.clone();
-            let (tx, rx) = channel::<Result<(String, String), String>>();
-            std::thread::spawn(move || {
-                let client = eliza::ElizaClient::new(eliza_url);
-                let result = client
-                    .translate("日本語", &target_lang, &source_text)
-                    .map(|translated| (source_text, translated));
-                let _ = tx.send(result);
-            });
-            self.translate_response_receiver = Some(rx);
-        }
-
         if self.config.auto_input_enabled {
             let result = match (
                 self.config.clipboard_enabled,
@@ -283,21 +316,13 @@ impl App {
             ) {
                 (true, true) => auto_input::send_ctrl_v_with_enter(),
                 (true, false) => auto_input::send_ctrl_v(),
-                (false, true) => auto_input::type_text_with_enter(&text),
-                (false, false) => auto_input::type_text(&text),
+                (false, true) => auto_input::type_text_with_enter(text),
+                (false, false) => auto_input::type_text(text),
             };
             if let Err(e) = result {
                 crate::log!("Auto-input error: {}", e);
             }
         }
-
-        self.status_message = "Transcription completed!".to_string();
-        self.is_transcribing = false;
-        self.transcription_receiver = None;
-        if let Some(rt) = self.tokio_runtime.take() {
-            rt.shutdown_background();
-        }
-        self.push_steamvr_snapshot();
     }
 
     /// デスクトップ側の Config を VR オーバーレイ描画スレッドに反映する。
@@ -307,8 +332,7 @@ impl App {
                 &self.config,
                 self.is_recording,
                 &self.transcribed_text,
-                &self.eliza_response,
-                &self.translated_response,
+                &self.processed_output,
                 &self.avatar_states,
             ));
         }
@@ -389,7 +413,6 @@ impl App {
     }
 
     /// VR オーバーレイ側から受け取ったアクションを Config に適用する。
-    /// 排他制御は既存の `enable_*_exclusive` を再利用する（Configの単一ソースを保つ）。
     fn apply_steamvr_action(&mut self, action: OverlayAction) {
         match action {
             OverlayAction::ToggleClipboard => {
@@ -412,23 +435,11 @@ impl App {
                     self.config.enable_vrchat_exclusive();
                 }
             }
-            OverlayAction::ToggleEliza => {
-                if self.config.eliza_enabled {
-                    self.config.eliza_enabled = false;
-                } else {
-                    self.config.enable_eliza_exclusive();
-                }
+            OverlayAction::ToggleProofread => {
+                self.config.proofread_enabled = !self.config.proofread_enabled;
             }
-            OverlayAction::ToggleElizaResponseToVrchat => {
-                self.config.eliza_response_to_vrchat_enabled =
-                    !self.config.eliza_response_to_vrchat_enabled;
-            }
-            OverlayAction::ToggleAutoTranslate => {
-                if self.config.auto_translate_enabled {
-                    self.config.auto_translate_enabled = false;
-                } else {
-                    self.config.enable_auto_translate_exclusive();
-                }
+            OverlayAction::SetMode(mode) => {
+                self.config.mode = mode;
             }
             OverlayAction::CallQvPen => {
                 if let Err(e) = auto_input::call_qvpen() {
@@ -486,41 +497,29 @@ impl eframe::App for App {
             }
         }
 
-        if let Some(ref receiver) = self.eliza_response_receiver
-            && let Ok(result) = receiver.try_recv()
-        {
-            match result {
-                Ok(response) => {
-                    self.eliza_response = response.clone();
-                    if self.config.eliza_response_to_vrchat_enabled {
-                        let client = vrchat::VRChatClient::new();
-                        if let Err(e) =
-                            client.send_message(&format!("{}{}", ELIZA_PREFIX, response))
-                        {
-                            crate::log!("Failed to send Eliza response to VRChat: {}", e);
-                        }
-                    }
-                }
-                Err(e) => crate::log!("Eliza error: {}", e),
-            }
-            self.eliza_response_receiver = None;
-            self.push_steamvr_snapshot();
+        // Grok の加工結果を受け取る。処理中は周期的に poll する
+        if self.process_receiver.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-
-        if let Some(ref receiver) = self.translate_response_receiver
+        if let Some(ref receiver) = self.process_receiver
             && let Ok(result) = receiver.try_recv()
         {
             match result {
-                Ok((original, translated)) => {
-                    self.translated_response = translated.clone();
-                    let client = vrchat::VRChatClient::new();
-                    if let Err(e) = client.send_message(&format!("{} / {}", original, translated)) {
-                        crate::log!("Failed to send translated message to VRChat: {}", e);
-                    }
+                Ok(output) => {
+                    self.processed_output = output.clone();
+                    self.dispatch_output(&output);
+                    self.status_message = "Done!".to_string();
                 }
-                Err(e) => crate::log!("Eliza translate error: {}", e),
+                Err(e) => {
+                    crate::log!("Grok error: {}", e);
+                    self.status_message = format!("Grok の処理に失敗: {}", e);
+                    // 失敗したときは認識結果をそのまま出力する
+                    let raw = self.transcribed_text.clone();
+                    self.processed_output = raw.clone();
+                    self.dispatch_output(&raw);
+                }
             }
-            self.translate_response_receiver = None;
+            self.process_receiver = None;
             self.push_steamvr_snapshot();
         }
 
@@ -573,12 +572,6 @@ impl eframe::App for App {
                             .desired_width(f32::INFINITY),
                     );
                     ui.add_space(10.0);
-                    ui.label("Eliza Agent URL:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.settings_eliza_url)
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.add_space(10.0);
                     ui.label("Input Device:");
                     egui::ComboBox::from_id_salt("input_device_combo")
                         .selected_text(
@@ -609,6 +602,12 @@ impl eframe::App for App {
                     );
 
                     ui.add_space(10.0);
+                    ui.label("翻訳フォーマット ({source} {translated}):");
+                    ui.text_edit_singleline(&mut self.config.translate_format);
+                    ui.label("質問フォーマット ({source} {answer}):");
+                    ui.text_edit_singleline(&mut self.config.question_format);
+
+                    ui.add_space(10.0);
                     ui.separator();
                     if ui.button("VR のボタン A/B/X/Y の設定…").clicked() {
                         self.avatar_draft = Some(self.config.avatar_buttons.clone());
@@ -620,7 +619,6 @@ impl eframe::App for App {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             self.config.xai_api_key = self.settings_xai_api_key.trim().to_string();
-                            self.config.eliza_url = self.settings_eliza_url.trim().to_string();
                             self.config.input_device_name = if self.selected_device_index == 0 {
                                 None
                             } else {
@@ -631,11 +629,11 @@ impl eframe::App for App {
                             if let Err(e) = self.config.save() {
                                 crate::log!("Failed to save config: {}", e);
                             }
+                            self.push_steamvr_snapshot();
                             self.show_settings = false;
                         }
                         if ui.button("Cancel").clicked() {
                             self.settings_xai_api_key = self.config.xai_api_key.clone();
-                            self.settings_eliza_url = self.config.eliza_url.clone();
                             self.selected_device_index = self
                                 .config
                                 .input_device_name
@@ -804,34 +802,20 @@ impl eframe::App for App {
                     egui::TextEdit::multiline(&mut self.transcribed_text).interactive(false),
                 );
 
-                if self.config.eliza_enabled && !self.eliza_response.is_empty() {
+                if !self.processed_output.is_empty()
+                    && self.processed_output != self.transcribed_text
+                {
                     ui.add_space(5.0);
-                    ui.label("Eliza:");
+                    ui.label("出力:");
                     ui.add_sized(
                         [300.0, 60.0],
-                        egui::TextEdit::multiline(&mut self.eliza_response).interactive(false),
-                    );
-                }
-
-                if self.config.auto_translate_enabled && !self.translated_response.is_empty() {
-                    ui.add_space(5.0);
-                    ui.label("Elizaからの翻訳結果:");
-                    ui.add_sized(
-                        [300.0, 60.0],
-                        egui::TextEdit::multiline(&mut self.translated_response).interactive(false),
+                        egui::TextEdit::multiline(&mut self.processed_output).interactive(false),
                     );
                 }
 
                 ui.add_space(10.0);
 
-                let mut clipboard_changed = false;
-                let mut auto_input_changed = false;
-                let mut send_enter_changed = false;
-                let mut vrchat_changed = false;
-                let mut auto_translate_changed = false;
-                let mut translate_lang_changed = false;
-                let mut eliza_changed = false;
-                let mut eliza_response_to_vrchat_changed = false;
+                let mut changed = false;
 
                 egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
                     egui::Frame::none()
@@ -841,14 +825,14 @@ impl eframe::App for App {
                                 ui.add_space(5.0);
                                 ui.set_width(300.0);
 
-                                clipboard_changed = ui
+                                changed |= ui
                                     .checkbox(
                                         &mut self.config.clipboard_enabled,
                                         "Copy to clipboard",
                                     )
                                     .changed();
 
-                                auto_input_changed = ui
+                                let auto_input_changed = ui
                                     .checkbox(
                                         &mut self.config.auto_input_enabled,
                                         "Input to active window",
@@ -857,9 +841,10 @@ impl eframe::App for App {
                                 if auto_input_changed && self.config.auto_input_enabled {
                                     self.config.enable_auto_input_exclusive();
                                 }
+                                changed |= auto_input_changed;
 
                                 ui.indent("send_enter_indent", |ui| {
-                                    send_enter_changed = ui
+                                    changed |= ui
                                         .add_enabled(
                                             self.config.auto_input_enabled,
                                             egui::Checkbox::new(
@@ -870,24 +855,37 @@ impl eframe::App for App {
                                         .changed();
                                 });
 
-                                vrchat_changed = ui
+                                let vrchat_changed = ui
                                     .checkbox(&mut self.config.vrchat_enabled, "Input to VRChat")
                                     .changed();
                                 if vrchat_changed && self.config.vrchat_enabled {
                                     self.config.enable_vrchat_exclusive();
                                 }
+                                changed |= vrchat_changed;
 
-                                auto_translate_changed = ui
-                                    .checkbox(
-                                        &mut self.config.auto_translate_enabled,
-                                        "自動翻訳 by Eliza",
-                                    )
+                                ui.separator();
+
+                                changed |= ui
+                                    .checkbox(&mut self.config.proofread_enabled, "校正 (Grok)")
                                     .changed();
-                                if auto_translate_changed && self.config.auto_translate_enabled {
-                                    self.config.enable_auto_translate_exclusive();
-                                }
 
-                                if self.config.auto_translate_enabled {
+                                ui.horizontal(|ui| {
+                                    ui.label("モード:");
+                                    for mode in Mode::ALL {
+                                        if ui
+                                            .selectable_label(
+                                                self.config.mode == mode,
+                                                mode.label(),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.config.mode = mode;
+                                            changed = true;
+                                        }
+                                    }
+                                });
+
+                                if self.config.mode == Mode::Translate {
                                     ui.indent("translate_lang_indent", |ui| {
                                         ui.horizontal(|ui| {
                                             ui.label("翻訳先言語:");
@@ -916,13 +914,13 @@ impl eframe::App for App {
                                                             )
                                                             .changed()
                                                         {
-                                                            translate_lang_changed = true;
+                                                            changed = true;
                                                         }
                                                     }
                                                 });
                                         });
                                         if self.config.translate_lang_preset == "CUSTOM" {
-                                            translate_lang_changed |= ui
+                                            changed |= ui
                                                 .text_edit_singleline(
                                                     &mut self.config.translate_lang_custom,
                                                 )
@@ -930,25 +928,6 @@ impl eframe::App for App {
                                         }
                                     });
                                 }
-
-                                eliza_changed = ui
-                                    .checkbox(&mut self.config.eliza_enabled, "お話 with Eliza")
-                                    .changed();
-                                if eliza_changed && self.config.eliza_enabled {
-                                    self.config.enable_eliza_exclusive();
-                                }
-
-                                ui.indent("eliza_response_to_vrchat_indent", |ui| {
-                                    eliza_response_to_vrchat_changed = ui
-                                        .add_enabled(
-                                            self.config.eliza_enabled,
-                                            egui::Checkbox::new(
-                                                &mut self.config.eliza_response_to_vrchat_enabled,
-                                                "Send Eliza's response to VRChat",
-                                            ),
-                                        )
-                                        .changed();
-                                });
 
                                 ui.add_space(5.0);
                                 if ui.button("📝 call QvPen").clicked()
@@ -961,15 +940,7 @@ impl eframe::App for App {
                         })
                 });
 
-                if clipboard_changed
-                    || auto_input_changed
-                    || send_enter_changed
-                    || vrchat_changed
-                    || auto_translate_changed
-                    || translate_lang_changed
-                    || eliza_changed
-                    || eliza_response_to_vrchat_changed
-                {
+                if changed {
                     if let Err(e) = self.config.save() {
                         crate::log!("Failed to save config: {}", e);
                     }
