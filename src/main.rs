@@ -47,7 +47,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "VRC Companion",
+        "voxtype",
         options,
         Box::new(move |cc| {
             let mut fonts = egui::FontDefinitions::default();
