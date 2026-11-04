@@ -81,25 +81,25 @@ pub struct OverlayField {
 pub fn overlay_fields(snapshot: &OverlaySnapshot) -> Vec<OverlayField> {
     vec![
         OverlayField {
-            label: "Copy to clipboard",
+            label: "クリップボードにコピー",
             enabled: snapshot.clipboard_enabled,
             indent: false,
             action: OverlayAction::ToggleClipboard,
         },
         OverlayField {
-            label: "Input to active window",
+            label: "アクティブなウィンドウに入力",
             enabled: snapshot.auto_input_enabled,
             indent: false,
             action: OverlayAction::ToggleAutoInput,
         },
         OverlayField {
-            label: "Send Enter after input",
+            label: "入力後に Enter を送る",
             enabled: snapshot.auto_input_send_enter,
             indent: true,
             action: OverlayAction::ToggleAutoInputSendEnter,
         },
         OverlayField {
-            label: "Input to VRChat",
+            label: "VRChat に入力",
             enabled: snapshot.vrchat_enabled,
             indent: false,
             action: OverlayAction::ToggleVrchat,
@@ -321,18 +321,22 @@ mod tests {
     fn test_overlay_fields_labels_order_and_indent() {
         let fields = overlay_fields(&all_false_snapshot());
         let expected: Vec<(&str, bool, OverlayAction)> = vec![
-            ("Copy to clipboard", false, OverlayAction::ToggleClipboard),
             (
-                "Input to active window",
+                "クリップボードにコピー",
+                false,
+                OverlayAction::ToggleClipboard,
+            ),
+            (
+                "アクティブなウィンドウに入力",
                 false,
                 OverlayAction::ToggleAutoInput,
             ),
             (
-                "Send Enter after input",
+                "入力後に Enter を送る",
                 true,
                 OverlayAction::ToggleAutoInputSendEnter,
             ),
-            ("Input to VRChat", false, OverlayAction::ToggleVrchat),
+            ("VRChat に入力", false, OverlayAction::ToggleVrchat),
             ("校正", false, OverlayAction::ToggleProofread),
             (
                 "エコー（そのまま）",

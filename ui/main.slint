@@ -300,7 +300,7 @@ export component MainWindow inherits Window {
                 below-threshold: level-below-threshold;
             }
             Text {
-                text: "Level: " + round(level * 1000) / 1000;
+                text: "音量: " + round(level * 1000) / 1000;
                 font-size: 12px;
                 color: #aaaaaa;
             }
@@ -331,23 +331,23 @@ export component MainWindow inherits Window {
                 spacing: 4px;
                 padding-left: 8px;
                 CheckBox {
-                    text: "Copy to clipboard";
+                    text: "クリップボードにコピー";
                     checked <=> root.clipboard-enabled;
                     toggled => { root.toggle-clipboard(self.checked); }
                 }
                 CheckBox {
-                    text: "Input to active window";
+                    text: "アクティブなウィンドウに入力";
                     checked <=> root.auto-input-enabled;
                     toggled => { root.toggle-auto-input(self.checked); }
                 }
                 CheckBox {
-                    text: "Send Enter after input";
+                    text: "入力後に Enter を送る";
                     enabled: auto-input-enabled;
                     checked <=> root.send-enter-enabled;
                     toggled => { root.toggle-send-enter(self.checked); }
                 }
                 CheckBox {
-                    text: "Input to VRChat";
+                    text: "VRChat に入力";
                     checked <=> root.vrchat-enabled;
                     toggled => { root.toggle-vrchat(self.checked); }
                 }
@@ -386,7 +386,7 @@ export component MainWindow inherits Window {
         }
 
         Button {
-            text: "📝 call QvPen";
+            text: "📝 QvPen を呼ぶ";
             clicked => { root.call-qvpen(); }
         }
     }
@@ -407,26 +407,26 @@ export component MainWindow inherits Window {
                 spacing: 8px;
                 alignment: start;
 
-                Text { text: "xAI API Key:"; }
+                Text { text: "xAI API キー:"; }
                 LineEdit {
                     text <=> root.settings-api-key;
                     input-type: password;
                 }
 
-                Text { text: "Input Device:"; }
+                Text { text: "入力デバイス:"; }
                 ComboBox {
                     model: root.devices;
                     current-index <=> root.device-index;
                 }
 
-                Text { text: "Silence Duration (秒): " + round(silence-duration * 10) / 10; }
+                Text { text: "無音とみなす時間 (秒): " + round(silence-duration * 10) / 10; }
                 Slider {
                     minimum: 0.5;
                     maximum: 10.0;
                     value <=> root.silence-duration;
                 }
 
-                Text { text: "Silence Threshold: " + round(silence-threshold * 1000) / 1000; }
+                Text { text: "無音とみなす音量: " + round(silence-threshold * 1000) / 1000; }
                 Slider {
                     minimum: 0.001;
                     maximum: 0.3;

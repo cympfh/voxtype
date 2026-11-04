@@ -409,7 +409,7 @@ impl App {
                 Ok(output) => {
                     self.processed_output = output.clone();
                     self.dispatch_output(&output);
-                    self.status_message = "Done!".to_string();
+                    self.status_message = "完了".to_string();
                 }
                 Err(e) => {
                     crate::log!("Grok error: {}", e);
@@ -483,7 +483,7 @@ impl App {
     }
 
     fn on_start_recording(&mut self) {
-        self.status_message = "Recording... Speak now!".to_string();
+        self.status_message = "録音中... 話してください".to_string();
 
         let mut recorder = AudioRecorder::new(self.config.silence_threshold);
         let (chunk_tx, chunk_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
@@ -575,7 +575,7 @@ impl App {
 
     fn on_transcription_success(&mut self) {
         let text = self.transcribed_text.clone();
-        self.status_message = "Transcription completed!".to_string();
+        self.status_message = "認識完了".to_string();
         self.is_transcribing = false;
         self.transcription_receiver = None;
         if let Some(rt) = self.tokio_runtime.take() {
@@ -821,7 +821,7 @@ impl App {
         {
             window.set_recording_info(
                 format!(
-                    "Recording: {:.1}s | Silence: {:.1}s/{:.1}s",
+                    "録音: {:.1}秒 | 無音: {:.1}秒/{:.1}秒",
                     recorder.get_recording_duration(),
                     recorder.get_silence_duration().as_secs_f32(),
                     self.config.silence_duration_secs,
