@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-04
+
+### Added
+
+- 校正 (Grok): フィラー除去・言い間違い修正をしてから出力する。オン/オフを切り替えられる
+- 質問モード (Grok): 認識結果をそのまま質問として AI に投げ、回答を出力する。Web / X の検索 (xAI Agent Tools) つき
+- 出力フォーマットを Settings から変更できる。既定は翻訳が `{source}/{translated}`、質問が `> {source}\nAI> {answer}`。プレースホルダは `{source}` `{translated}` `{answer}`
+- VR のオーバーレイに「加工」カードを追加し、校正のオン/オフとモード(エコー/翻訳/質問)を VR からも切り替えられる
+
+### Changed
+
+- 翻訳は Eliza サーバーではなく xAI の Grok (grok-4.7) で行う。翻訳と質問は排他のモード選択になり、常時出力されるのは1系統だけ
+- 認識結果の処理は「校正(任意) → モード(エコー/翻訳/質問) → フォーマット → 出力先」の1本のパイプラインになった
+- VRChat に送るテキストの先頭に付けていた「> 」をやめた。見せ方はフォーマットで自由に変えられる
+
+### Removed
+
+- Eliza サーバーへの依存を削除。Eliza Agent URL の設定、「Send to Eliza」、Eliza 応答の VRChat 送信を廃止
+- 設定ファイルの `eliza_*` キーは読み込み時に破棄される。旧 `auto_translate_enabled: true` はモード「翻訳」として引き継ぐ
+
 ## [0.6.4] - 2026-10-20
 
 ### Fixed

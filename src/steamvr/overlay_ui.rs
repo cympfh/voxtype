@@ -1,7 +1,7 @@
 //! SteamVR オーバーレイの中身(egui)。描画先(WGL / テスト)に依存しないので全OSでテストできる。
 //!
 //! 見た目: 暗い背景にカードを並べる。上から、見出し(右上に小さな「キー割り当て」ボタンと録音中の表示) →
-//! Start/Stop と QvPen の大きなボタン → 送り先・Eliza の2枚のカード(各行は右端にスイッチ) →
+//! Start/Stop と QvPen の大きなボタン → 送り先・加工の2枚のカード(各行は右端にスイッチ) →
 //! 認識結果のカード。右端には丸い A/B/X/Y ボタンが縦に4つ並ぶ(アバターパラメーターのオン/オフ)。
 //! 座標はすべて論理ピクセル(`LOGICAL_W` × `LOGICAL_H`)。実際のテクスチャは
 //! `PIXELS_PER_POINT` 倍の解像度で描くので、大きく表示しても文字がぼやけない。
@@ -147,9 +147,9 @@ pub fn draw(
             });
             y += 64.0 + GAP;
 
-            // スイッチのカード: 送り先(先頭4つ)と Eliza(残り)
+            // スイッチのカード: 送り先(先頭4つ)と 加工(残り)
             let fields = overlay_fields(snapshot);
-            let (outputs, eliza) = fields.split_at(4);
+            let (outputs, processing) = fields.split_at(4);
             let col_w = (width - GAP) / 2.0;
             let h1 = toggle_card(
                 ui,
@@ -162,8 +162,8 @@ pub fn draw(
             );
             let h2 = toggle_card(
                 ui,
-                "Eliza",
-                eliza,
+                "加工",
+                processing,
                 pos2(left + col_w + GAP, y),
                 col_w,
                 &mut clicked,
@@ -452,13 +452,11 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
-/// 認識結果カードの中身(見出し, 本文)。Eliza の返事 / 翻訳結果は今までと同じ出し分け
+/// 認識結果カードの中身(見出し, 本文)。加工後の出力があれば並べる
 fn text_sections(snapshot: &OverlaySnapshot) -> Vec<(&'static str, &str)> {
     let mut sections = vec![("Transcribed", snapshot.last_transcription.as_str())];
-    if snapshot.eliza_enabled && !snapshot.last_eliza_response.is_empty() {
-        sections.push(("Eliza", snapshot.last_eliza_response.as_str()));
-    } else if snapshot.auto_translate_enabled && !snapshot.last_translated_response.is_empty() {
-        sections.push(("翻訳結果", snapshot.last_translated_response.as_str()));
+    if !snapshot.last_output.is_empty() && snapshot.last_output != snapshot.last_transcription {
+        sections.push(("出力", snapshot.last_output.as_str()));
     }
     sections
 }
@@ -478,7 +476,7 @@ struct TextScroll {
     dragging: bool,
 }
 
-/// 最後の認識結果と、Eliza の返事 / 翻訳結果。長いときは押したまま上下に動かすとスクロールする
+/// 最後の認識結果と、加工後の出力。長いときは押したまま上下に動かすとスクロールする
 /// (省略せず全部出す)。
 fn text_card(ui: &mut egui::Ui, snapshot: &OverlaySnapshot, rect: Rect) {
     if rect.height() < 40.0 {
@@ -612,14 +610,12 @@ mod tests {
             auto_input_enabled: false,
             auto_input_send_enter: false,
             vrchat_enabled: true,
-            eliza_enabled: false,
-            eliza_response_to_vrchat_enabled: false,
-            auto_translate_enabled: true,
+            proofread_enabled: false,
+            mode: crate::config::Mode::Translate,
             is_recording: false,
             last_transcription: "こんにちは".to_string(),
-            last_eliza_response: String::new(),
-            last_translated_response:
-                "Hello, this is a fairly long translated sentence that should wrap onto more lines"
+            last_output:
+                "こんにちは/Hello, this is a fairly long translated sentence that should wrap onto more lines"
                     .to_string(),
             avatar_buttons: [
                 AvatarButtonView {
@@ -670,8 +666,8 @@ mod tests {
         setup_style(&ctx);
         let s = snapshot();
         let (_, targets) = frame(&ctx, &s, vec![]);
-        // キー割り当て、A/B/X(Y は未設定)、Start/Stop、QvPen、スイッチ 7 つ
-        assert_eq!(targets.len(), 13);
+        // キー割り当て、A/B/X(Y は未設定)、Start/Stop、QvPen、スイッチ 8 つ
+        assert_eq!(targets.len(), 14);
         for t in &targets {
             let (clicked, _) = frame(&ctx, &s, click(t.rect.center()));
             assert_eq!(clicked, vec![t.action], "{:?} を押したとき", t.action);
@@ -720,7 +716,7 @@ mod tests {
         let (_, targets) = frame(&ctx, &s, vec![]);
         let fields: Vec<OverlayAction> = overlay_fields(&s).iter().map(|f| f.action).collect();
         assert_eq!(targets[0].action, OverlayAction::OpenBindingUi);
-        let switches: Vec<OverlayAction> = targets[6..13].iter().map(|t| t.action).collect();
+        let switches: Vec<OverlayAction> = targets[6..14].iter().map(|t| t.action).collect();
         assert_eq!(switches, fields);
     }
 
@@ -893,9 +889,8 @@ mod tests {
 
     fn long_snapshot() -> OverlaySnapshot {
         let mut s = snapshot();
-        s.eliza_enabled = true;
         s.last_transcription = "とても長い書き起こしです。".repeat(20);
-        s.last_eliza_response = "Eliza のとても長い返事です。".repeat(30);
+        s.last_output = "とても長い出力です。".repeat(30);
         s
     }
 
@@ -954,7 +949,7 @@ mod tests {
         frame(&ctx, &long, vec![]);
         drag_text(&ctx, &long, 10.0, 6);
         assert!(TEXT_SCROLL_PROBE.with(|c| c.get()) > 0.0);
-        long.last_eliza_response.push_str("新しい返事");
+        long.last_output.push_str("新しい出力");
         frame(&ctx, &long, vec![]);
         assert_eq!(TEXT_SCROLL_PROBE.with(|c| c.get()), 0.0);
     }
@@ -965,7 +960,7 @@ mod tests {
         setup_style(&ctx);
         let s = long_snapshot();
         let (_, targets) = frame(&ctx, &s, vec![]);
-        assert_eq!(targets.len(), 13);
+        assert_eq!(targets.len(), 14);
         for t in &targets {
             let c = t.rect.center();
             let clicked = jittery_click(&ctx, &s, c, &[vec2(4.0, -3.0)], c + vec2(3.0, 3.0), 0.3);

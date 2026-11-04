@@ -1,6 +1,6 @@
 [package]
 name = "vrc-companion"
-version = "0.6.5"
+version = "0.7.0"
 edition = "2024"
 
 [dependencies]
@@ -17,6 +17,7 @@ dirs = "5.0"
 arboard = "3.3"
 enigo = "0.6.1"
 rosc = "0.10"
+chrono = "0.4.45"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

@@ -1,3 +1,3 @@
 pub mod auto_input;
-pub mod eliza;
+pub mod grok;
 pub mod vrchat;
