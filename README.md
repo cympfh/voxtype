@@ -1,8 +1,15 @@
-<p align="center"><img src="assets/logo.svg" width="128" alt="VRC Companion"></p>
+<p align="center">
+  <img src="assets/voxtype.svg" width="128" alt="voxtype">
+  &nbsp;&nbsp;&nbsp;
+  <img src="assets/logo.svg" width="128" alt="VRC Companion">
+</p>
 
-# VRC Companion
+# voxtype (PC) + VRC Companion (SteamVR)
 
 VRChat で遊んでるときにあると便利なあれこれ
+
+- **voxtype**: PC 側の常駐ツール。音声をタイピング無しで入力・翻訳・校正できる
+- **VRC Companion**: SteamVR 側のオーバーレイ。voxtype を VR の中から操作する
 
 ## 概要
 

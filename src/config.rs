@@ -15,18 +15,6 @@ pub enum Mode {
     Question,
 }
 
-impl Mode {
-    pub const ALL: [Mode; 3] = [Mode::Echo, Mode::Translate, Mode::Question];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Mode::Echo => "エコー（そのまま）",
-            Mode::Translate => "翻訳",
-            Mode::Question => "質問 (AI)",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]

@@ -1,10 +1,10 @@
 [package]
 name = "vrc-companion"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 
 [dependencies]
-eframe = "0.29"
+slint = "1"
 egui = "0.29"
 cpal = "0.15"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
@@ -35,3 +35,4 @@ egui_glow = "0.29"
 
 [build-dependencies]
 embed-resource = "3"
+slint-build = "1"

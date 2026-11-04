@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2A1B5E"/><stop offset="1" stop-color="#0F0C29"/></linearGradient></defs>
+  <rect width="512" height="512" rx="112" fill="url(#g)"/>
+  <!-- 声の波形 -->
+  <g fill="#2BD9C4">
+    <rect x="97" y="226" width="26" height="60" rx="13"/>
+    <rect x="139" y="201" width="26" height="110" rx="13"/>
+    <rect x="181" y="176" width="26" height="160" rx="13"/>
+    <rect x="223" y="201" width="26" height="110" rx="13"/>
+    <rect x="265" y="226" width="26" height="60" rx="13"/>
+  </g>
+  <!-- テキスト行 -->
+  <rect x="330" y="183" width="122" height="34" rx="17" fill="#FFFFFF"/>
+  <rect x="330" y="251" width="86" height="34" rx="17" fill="#7C5CFF"/>
+  <!-- キャレット -->
+  <rect x="340" y="300" width="12" height="52" rx="6" fill="#FF5C9A"/>
+</svg>

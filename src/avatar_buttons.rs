@@ -16,22 +16,11 @@ pub enum ParamType {
 }
 
 impl ParamType {
-    pub const ALL: [ParamType; 3] = [ParamType::Bool, ParamType::Int, ParamType::Float];
-
     pub fn label(self) -> &'static str {
         match self {
             ParamType::Bool => "Bool",
             ParamType::Int => "Int (0〜255)",
             ParamType::Float => "Float (-1.0〜1.0)",
-        }
-    }
-
-    /// 型を選びなおしたときの (オンの値, オフの値)
-    pub fn default_values(self) -> (&'static str, &'static str) {
-        match self {
-            ParamType::Bool => ("true", "false"),
-            ParamType::Int => ("1", "0"),
-            ParamType::Float => ("1.0", "0.0"),
         }
     }
 }
