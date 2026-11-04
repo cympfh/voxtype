@@ -280,8 +280,18 @@ impl App {
                             ))
                         }
                         Mode::Question => {
-                            let answer = client.question(&raw)?;
-                            Ok(grok::render_template(&question_format, &raw, "", &answer))
+                            let source = if proofread {
+                                client.correct(&raw)?
+                            } else {
+                                raw
+                            };
+                            let answer = client.question(&source)?;
+                            Ok(grok::render_template(
+                                &question_format,
+                                &source,
+                                "",
+                                &answer,
+                            ))
                         }
                     }
                 })();
