@@ -301,6 +301,7 @@ fn run_session(
     let mut was_recording = latest.is_recording;
     let mut last_alive_check = Instant::now();
     let mut frame_sync_errors = RateLimited::new(Duration::from_secs(60));
+    let mut texture_errors = RateLimited::new(Duration::from_secs(60));
     loop {
         // WaitFrameSync でコンポジタの次フレームに同期する(固定インターバルの
         // recv_timeoutによるポーリングではなく、コンポジタ側のペースに揃える)。
@@ -389,7 +390,16 @@ fn run_session(
                     e_color_space: ffi::COLOR_SPACE_AUTO,
                 };
                 if let Err(e) = set_overlay_texture(lib, overlay_handle, &mut tex) {
-                    crate::log!("[SteamVR] SetOverlayTexture 失敗: {}", e);
+                    // ハンドルが無効 = サーバ側のオーバーレイが消えた(SteamVR 再起動など)。
+                    // このまま回り続けても直らないので、セッションを畳んでつなぎ直す
+                    if e == ffi::OVERLAY_ERROR_INVALID_HANDLE {
+                        return SessionEnd::Failed("SetOverlayTexture: ハンドルが無効".to_string());
+                    }
+                    if let Some(line) =
+                        texture_errors.check(Instant::now(), &format!("EVROverlayError={}", e))
+                    {
+                        crate::log!("[SteamVR] SetOverlayTexture 失敗: {}", line);
+                    }
                 }
             }
             Err(e) => crate::log!("[SteamVR] render 失敗: {}", e),
@@ -904,10 +914,10 @@ fn set_overlay_texture(
     lib: &OpenVrLibrary,
     handle: VrOverlayHandle,
     texture: &mut Texture_t,
-) -> Result<(), String> {
+) -> Result<(), ffi::EVROverlayError> {
     let err = unsafe { (lib.overlay().set_overlay_texture)(handle, texture) };
     if err != 0 {
-        return Err(format!("EVROverlayError={}", err));
+        return Err(err);
     }
     Ok(())
 }

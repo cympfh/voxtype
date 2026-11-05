@@ -74,6 +74,9 @@ pub struct Texture_t {
 
 /// SteamVR が終わる。AcknowledgeQuit_Exiting → VR_Shutdown をすぐ呼ぶ(呼ばないと数秒後にプロセスごと落とされる)
 pub const EVENT_QUIT: u32 = 700;
+/// EVROverlayError_InvalidHandle: オーバーレイのハンドルが無効
+/// (SteamVR の再起動などでサーバ側のオーバーレイが消えた)
+pub const OVERLAY_ERROR_INVALID_HANDLE: EVROverlayError = 11;
 /// EVROverlayError_KeyInUse: 同じキーのオーバーレイがもうある
 pub const OVERLAY_ERROR_KEY_IN_USE: i32 = 17;
 pub const EVENT_MOUSE_MOVE: u32 = 300;
