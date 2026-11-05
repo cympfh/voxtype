@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - voxtype のアイコン (assets/voxtype.svg / voxtype.png)。README の冒頭に vrc-companion のロゴと並べた
 - 録音開始/停止のグローバルショートカットキー (既定 F9)。設定ページで変更できる。空欄にすると無効
 - Silence Duration/Threshold の自動キャリブレーション。設定ページのボタンから、案内 (無音5秒→発話5秒→無音5秒) に従うと推奨値が入る
+
+### Changed
+
+- SteamVR が終了しても PC 側は終了しなくなった。切断して待機に戻り、SteamVR が起動したら自動でつなぎ直す (別コピーが既につないでいる場合だけ終了する)
 - 翻訳先言語の候補リスト。設定ページで `/` 区切りで編集する (既定 `ZH/EN`、先頭が初期選択)。メイン画面はその候補から選ぶプルダウンのみ
 
 ## [0.7.0] - 2026-11-04

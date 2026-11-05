@@ -104,7 +104,8 @@ impl SessionFlags {
 }
 
 /// SteamVR が動いているときだけつなぐ(動いていなければ起動を待つ。SteamVR を起動することはない)。
-/// つないだあとに SteamVR が終わったら、切断してからアプリに終了を頼む。
+/// つないだあとに SteamVR が終わっても切断して待機に戻り、起動したら自動でつなぎ直す。
+/// アプリに終了を頼むのは、別コピーが既につないでいる(AnotherInstance)ときだけ。
 fn supervise(
     initial: OverlaySnapshot,
     width_m: f32,
