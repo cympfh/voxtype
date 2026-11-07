@@ -192,6 +192,9 @@ export component MainWindow inherits Window {
     icon: @image-url("../assets/voxtype.png");
     min-width: 400px;
     min-height: 700px;
+    // 初期サイズ。全部の要素(最下部の「QvPen を呼ぶ」まで)が見切れない高さにする
+    preferred-width: 440px;
+    preferred-height: 820px;
 
     // --- 表示用(Rust から書き込む) ---
     in property <string> status-text: "";
@@ -326,8 +329,6 @@ export component MainWindow inherits Window {
                 height: 76px;
             }
         }
-
-        Rectangle { vertical-stretch: 1; }
 
         GroupBox {
             title: "送り先";
