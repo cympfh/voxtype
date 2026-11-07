@@ -52,6 +52,12 @@ pub struct Config {
     /// 質問モードの出力テンプレート。`{source}` `{answer}` が使える
     #[serde(default = "default_question_format")]
     pub question_format: String,
+    /// 翻訳モードで結果を待つ間に VRChat へ先に送るテンプレート。`{source}` が使える
+    #[serde(default = "default_pending_format")]
+    pub translate_pending_format: String,
+    /// 質問モードで結果を待つ間に VRChat へ先に送るテンプレート。`{source}` が使える
+    #[serde(default = "default_pending_format")]
+    pub question_pending_format: String,
     /// SteamVR オーバーレイの表示幅(メートル)。起動時に読む
     #[serde(default = "default_steamvr_overlay_width_m")]
     pub steamvr_overlay_width_m: f32,
@@ -107,6 +113,10 @@ fn default_question_format() -> String {
     "> {source}\nAI> {answer}".to_string()
 }
 
+fn default_pending_format() -> String {
+    "{source}".to_string()
+}
+
 /// 以前は指定なし(SteamVR の既定 1m、UI は 400px 幅に 14px の文字)。
 /// 1.92m(0.5.1 までの 2.4m の 80%)。UI は 600px 幅・16〜17px の文字
 fn default_steamvr_overlay_width_m() -> f32 {
@@ -140,6 +150,8 @@ impl Default for Config {
             translate_lang_selected: default_translate_lang_selected(),
             translate_format: default_translate_format(),
             question_format: default_question_format(),
+            translate_pending_format: default_pending_format(),
+            question_pending_format: default_pending_format(),
             steamvr_overlay_width_m: default_steamvr_overlay_width_m(),
             shortcut_key: default_shortcut_key(),
             avatar_buttons: crate::avatar_buttons::default_buttons(),
@@ -335,6 +347,8 @@ mod tests {
         assert_eq!(config.mode, Mode::Echo);
         assert_eq!(config.translate_format, "{source}/{translated}");
         assert_eq!(config.question_format, "> {source}\nAI> {answer}");
+        assert_eq!(config.translate_pending_format, "{source}");
+        assert_eq!(config.question_pending_format, "{source}");
     }
 
     #[test]

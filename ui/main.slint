@@ -192,6 +192,9 @@ export component MainWindow inherits Window {
     icon: @image-url("../assets/voxtype.png");
     min-width: 400px;
     min-height: 700px;
+    // 初期サイズ。全部の要素(最下部の「QvPen を呼ぶ」まで)が見切れない高さにする
+    preferred-width: 440px;
+    preferred-height: 820px;
 
     // --- 表示用(Rust から書き込む) ---
     in property <string> status-text: "";
@@ -226,6 +229,9 @@ export component MainWindow inherits Window {
     in-out property <float> silence-threshold: 0.03;
     in-out property <string> translate-format: "";
     in-out property <string> question-format: "";
+    // 翻訳・質問の結果を待つ間に VRChat へ先行送信するテンプレート
+    in-out property <string> translate-pending-format: "";
+    in-out property <string> question-pending-format: "";
     // 翻訳先言語の候補リスト(設定ページの編集用、`/` 区切りテキスト)
     in-out property <string> translate-langs-text: "";
     // 録音開始/停止のグローバルショートカットキー(空で無効)
@@ -323,8 +329,6 @@ export component MainWindow inherits Window {
                 height: 76px;
             }
         }
-
-        Rectangle { vertical-stretch: 1; }
 
         GroupBox {
             title: "送り先";
@@ -473,6 +477,18 @@ export component MainWindow inherits Window {
                 TextEdit {
                     text <=> root.question-format;
                     min-height: 64px;
+                }
+
+                Text { text: "翻訳中フォーマット ({source} が使えます):"; }
+                TextEdit {
+                    text <=> root.translate-pending-format;
+                    min-height: 40px;
+                }
+
+                Text { text: "質問中フォーマット ({source} が使えます):"; }
+                TextEdit {
+                    text <=> root.question-pending-format;
+                    min-height: 40px;
                 }
 
                 Button {

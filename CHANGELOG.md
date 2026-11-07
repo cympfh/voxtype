@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- 翻訳・質問モードで VRChat 送信時、結果を待たずにソースを先に送る。結果が来たらフォーマット済みの文で送り直す (chatbox は上書き表示される)。待機中に送る文は設定ページの「翻訳中フォーマット」「質問中フォーマット」(既定 `{source}`) で変えられる
+
 ## [0.8.0] - 2026-11-04
 
 ### Changed
