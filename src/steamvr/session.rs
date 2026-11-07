@@ -29,11 +29,7 @@ const OVERLAY_NAME: &str = "VRC Companion";
 pub(super) const OVERLAY_WIDTH: u32 = (LOGICAL_W * PIXELS_PER_POINT) as u32;
 pub(super) const OVERLAY_HEIGHT: u32 = (LOGICAL_H * PIXELS_PER_POINT) as u32;
 
-pub fn start(
-    initial: OverlaySnapshot,
-    width_m: f32,
-    egui_ctx: egui::Context,
-) -> Option<OverlayHandle> {
+pub fn start(initial: OverlaySnapshot, width_m: f32) -> Option<OverlayHandle> {
     let (snapshot_tx, snapshot_rx) = mpsc::channel::<OverlaySnapshot>();
     let (action_tx, action_rx) = mpsc::channel::<OverlayAction>();
     let (command_tx, command_rx) = mpsc::channel::<OverlayCommand>();
@@ -41,7 +37,6 @@ pub fn start(
         connected: Arc::new(AtomicBool::new(false)),
         exit_requested: Arc::new(AtomicBool::new(false)),
         problem: Arc::new(std::sync::Mutex::new(None)),
-        egui_ctx,
     };
     let connected = flags.connected.clone();
     let exit_requested = flags.exit_requested.clone();
@@ -52,7 +47,6 @@ pub fn start(
     let spawned = std::thread::Builder::new()
         .name("steamvr".into())
         .spawn(move || {
-            let ctx = flags.egui_ctx.clone();
             // supervise 自体が落ちたら(run_session の外)つなぎ直せないので、画面にだけ出す
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 supervise(initial, width_m, snapshot_rx, action_tx, command_rx, flags)
@@ -62,7 +56,6 @@ pub fn start(
                     &inner_problem,
                     Some("VR の処理が止まった(アプリを再起動してください)".into()),
                 );
-                ctx.request_repaint();
             }
         });
     if let Err(e) = spawned {
@@ -85,8 +78,6 @@ struct SessionFlags {
     connected: Arc<AtomicBool>,
     exit_requested: Arc<AtomicBool>,
     problem: Arc<std::sync::Mutex<Option<String>>>,
-    /// 知らせたらすぐ画面の update() が回るように
-    egui_ctx: egui::Context,
 }
 
 fn set_problem(slot: &std::sync::Mutex<Option<String>>, value: Option<String>) {
@@ -101,22 +92,20 @@ const RESTART_AFTER_PANIC: Duration = Duration::from_secs(3);
 impl SessionFlags {
     fn set_problem(&self, value: Option<String>) {
         set_problem(&self.problem, value);
-        self.egui_ctx.request_repaint();
     }
 
     fn set_connected(&self, on: bool) {
         self.connected.store(on, Ordering::SeqCst);
-        self.egui_ctx.request_repaint();
     }
 
     fn request_app_exit(&self) {
         self.exit_requested.store(true, Ordering::SeqCst);
-        self.egui_ctx.request_repaint();
     }
 }
 
 /// SteamVR が動いているときだけつなぐ(動いていなければ起動を待つ。SteamVR を起動することはない)。
-/// つないだあとに SteamVR が終わったら、切断してからアプリに終了を頼む。
+/// つないだあとに SteamVR が終わっても切断して待機に戻り、起動したら自動でつなぎ直す。
+/// アプリに終了を頼むのは、別コピーが既につないでいる(AnotherInstance)ときだけ。
 fn supervise(
     initial: OverlaySnapshot,
     width_m: f32,
@@ -312,6 +301,7 @@ fn run_session(
     let mut was_recording = latest.is_recording;
     let mut last_alive_check = Instant::now();
     let mut frame_sync_errors = RateLimited::new(Duration::from_secs(60));
+    let mut texture_errors = RateLimited::new(Duration::from_secs(60));
     loop {
         // WaitFrameSync でコンポジタの次フレームに同期する(固定インターバルの
         // recv_timeoutによるポーリングではなく、コンポジタ側のペースに揃える)。
@@ -400,7 +390,16 @@ fn run_session(
                     e_color_space: ffi::COLOR_SPACE_AUTO,
                 };
                 if let Err(e) = set_overlay_texture(lib, overlay_handle, &mut tex) {
-                    crate::log!("[SteamVR] SetOverlayTexture 失敗: {}", e);
+                    // ハンドルが無効 = サーバ側のオーバーレイが消えた(SteamVR 再起動など)。
+                    // このまま回り続けても直らないので、セッションを畳んでつなぎ直す
+                    if e == ffi::OVERLAY_ERROR_INVALID_HANDLE {
+                        return SessionEnd::Failed("SetOverlayTexture: ハンドルが無効".to_string());
+                    }
+                    if let Some(line) =
+                        texture_errors.check(Instant::now(), &format!("EVROverlayError={}", e))
+                    {
+                        crate::log!("[SteamVR] SetOverlayTexture 失敗: {}", line);
+                    }
                 }
             }
             Err(e) => crate::log!("[SteamVR] render 失敗: {}", e),
@@ -915,10 +914,10 @@ fn set_overlay_texture(
     lib: &OpenVrLibrary,
     handle: VrOverlayHandle,
     texture: &mut Texture_t,
-) -> Result<(), String> {
+) -> Result<(), ffi::EVROverlayError> {
     let err = unsafe { (lib.overlay().set_overlay_texture)(handle, texture) };
     if err != 0 {
-        return Err(format!("EVROverlayError={}", err));
+        return Err(err);
     }
     Ok(())
 }

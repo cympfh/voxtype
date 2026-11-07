@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-04
+
+### Changed
+
+- PC 側の画面を egui から Slint (fluent スタイル) で作り直した。送り先・加工の切り替えはグループに整理
+- PC 側ウィンドウと exe のアイコンを voxtype の新しいアイコンに変更。SteamVR のタブ・アプリ一覧のアイコンは VRC Companion のロゴのまま
+- 設定ページの Silence Threshold のスライダーは対数目盛りではなくなった
+- 質問モードは構造化出力 ({context, citation, answer}) を使い、VRChat に送るのは回答文 (answer) のみになった。参考 URL や前置きは出ない
+
+### Added
+
+- voxtype のアイコン (assets/voxtype.svg / voxtype.png)。README の冒頭に vrc-companion のロゴと並べた
+- 録音開始/停止のグローバルショートカットキー (既定 F9)。設定ページで変更できる。空欄にすると無効
+- Silence Duration/Threshold の自動キャリブレーション。設定ページのボタンから、案内 (無音5秒→発話5秒→無音5秒) に従うと推奨値が入る
+
+### Changed
+
+- SteamVR が終了しても PC 側は終了しなくなった。切断して待機に戻り、SteamVR が起動したら自動でつなぎ直す (別コピーが既につないでいる場合だけ終了する)
+- 翻訳先言語の候補リスト。設定ページで `/` 区切りで編集する (既定 `ZH/EN`、先頭が初期選択)。メイン画面はその候補から選ぶプルダウンのみ
+
 ## [0.7.0] - 2026-11-04
 
 ### Added

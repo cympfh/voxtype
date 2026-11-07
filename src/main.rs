@@ -7,17 +7,25 @@ mod config;
 mod integrations;
 mod steamvr;
 
+slint::include_modules!();
+
 use audio::AudioRecorder;
 use audio::speech_to_text::SpeechToTextClient;
-use avatar_buttons::{AvatarButton, LABELS, ParamType, ToggleStates};
+use avatar_buttons::{AvatarButton, ParamType, ToggleStates};
 use config::{Config, Mode};
-use eframe::egui;
+use global_hotkey::hotkey::HotKey;
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use integrations::{auto_input, grok, vrchat};
+use slint::Model;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::str::FromStr;
 use std::sync::mpsc::{Receiver, channel};
+use std::time::Instant;
 use steamvr::{OverlayAction, OverlayHandle, OverlaySnapshot};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-fn main() -> eframe::Result<()> {
+fn main() -> Result<(), slint::PlatformError> {
     // 見た目の確認用: SteamVR なしでオーバーレイを BMP に書き出して終わる
     #[cfg(windows)]
     {
@@ -34,37 +42,80 @@ fn main() -> eframe::Result<()> {
     applog::init();
     applog::install_panic_hook();
     crate::log!("[App] vrc-companion {} 起動", env!("CARGO_PKG_VERSION"));
+
+    // Windows 11 標準の見た目に寄せる(ウィンドウ生成より前に決める)
+    // SAFETY: まだスレッドを立てていない main の先頭でのみ呼ぶ
+    unsafe { std::env::set_var("SLINT_STYLE", "fluent") };
+
     let config = Config::load();
+    let window = MainWindow::new()?;
+    let app = Rc::new(RefCell::new(App::new(config)));
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([380.0, 680.0])
-            .with_icon(
-                eframe::icon_data::from_png_bytes(include_bytes!("../assets/logo.png"))
-                    .expect("assets/logo.png"),
-            ),
-        ..Default::default()
-    };
+    // 初期値を UI に流す
+    {
+        let app = app.borrow();
+        app.sync_config_to_ui(&window);
+        app.sync_display_to_ui(&window);
+        let devices: Vec<slint::SharedString> = app
+            .available_devices
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect();
+        window.set_devices(slint::ModelRc::new(slint::VecModel::from(devices)));
+        window.set_device_index(app.selected_device_index as i32);
+        window.set_silence_duration(app.config.silence_duration_secs);
+        window.set_silence_threshold(app.config.silence_threshold);
+    }
 
-    eframe::run_native(
-        "voxtype",
-        options,
-        Box::new(move |cc| {
-            let mut fonts = egui::FontDefinitions::default();
-            fonts.font_data.insert(
-                "japanese".to_owned(),
-                egui::FontData::from_static(include_bytes!("../fonts/NotoSansJP-Regular.ttf")),
-            );
-            fonts
-                .families
-                .entry(egui::FontFamily::Proportional)
-                .or_default()
-                .insert(0, "japanese".to_owned());
-            cc.egui_ctx.set_fonts(fonts);
+    wire_callbacks(&window, &app);
 
-            Ok(Box::new(App::new(config, cc.egui_ctx.clone())))
-        }),
-    )
+    // 録音の無音検知・チャネルの poll を回すタイマー。
+    // VR の中でデスクトップ画面を見ていない間も状態を更新し続けるために常時回す
+    // (egui 版の request_repaint_after(100ms) と同じ役割)
+    let timer = slint::Timer::default();
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(50),
+            move || {
+                let Some(window) = weak.upgrade() else { return };
+                app.borrow_mut().tick(&window);
+            },
+        );
+    }
+
+    window.run()
+}
+
+/// 無音/発話の自動キャリブレーションの進行状態
+struct Calibration {
+    recorder: AudioRecorder,
+    /// チャンク受信側。drop されると送信が詰まるので保持だけする
+    _rx: tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>,
+    /// 0=無音(5秒), 1=発話(5秒), 2=無音(5秒)
+    phase: u8,
+    phase_start: Instant,
+    noise_samples: Vec<f32>,
+    speech_samples: Vec<f32>,
+    /// フェーズ2終了時に計算した推奨 threshold
+    new_threshold: Option<f32>,
+    /// フェーズ3でレベルが threshold を下回るまでの秒数(発話の尾ひれ)
+    tail_secs: Option<f32>,
+}
+
+const CALIB_PHASE_SECS: f32 = 5.0;
+
+fn percentile(samples: &[f32], q: f32) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut v = samples.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((v.len() - 1) as f32 * q).round() as usize;
+    v[idx]
 }
 
 pub enum TranscriptionMessage {
@@ -89,19 +140,27 @@ struct App {
     process_receiver: Option<Receiver<Result<String, String>>>,
     steamvr_overlay: Option<OverlayHandle>,
 
-    show_settings: bool,
     /// A/B/X/Y の今のオン/オフ(起動時はすべてオフ)
     avatar_states: ToggleStates,
-    /// A/B/X/Y の設定の窓。開いている間の書きかけ
-    avatar_draft: Option<[AvatarButton; 4]>,
-    settings_xai_api_key: String,
+    /// A/B/X/Y の設定の窓。開いている間だけ持つ
+    avatar_window: Option<AvatarWindow>,
 
     available_devices: Vec<String>,
     selected_device_index: usize,
+
+    /// オーバーレイ側から config が変わったら true。次の tick で UI に流す
+    ui_config_dirty: bool,
+
+    /// 録音開始/停止のグローバルショートカット
+    hotkey_manager: Option<GlobalHotKeyManager>,
+    registered_hotkey: Option<HotKey>,
+
+    /// 実行中の自動キャリブレーション
+    calibration: Option<Calibration>,
 }
 
 impl App {
-    fn new(config: Config, egui_ctx: egui::Context) -> Self {
+    fn new(config: Config) -> Self {
         let mut available_devices = audio::get_input_devices().unwrap_or_else(|e| {
             crate::log!("Failed to get input devices: {}", e);
             vec![]
@@ -117,11 +176,9 @@ impl App {
         let steamvr_overlay = steamvr::start(
             OverlaySnapshot::from_config(&config, false, "", "", &ToggleStates::default()),
             config.steamvr_overlay_width_m,
-            egui_ctx,
         );
 
-        Self {
-            settings_xai_api_key: config.xai_api_key.clone(),
+        let mut app = Self {
             config,
             is_recording: false,
             is_transcribing: false,
@@ -133,16 +190,300 @@ impl App {
             tokio_runtime: None,
             process_receiver: None,
             steamvr_overlay,
-            show_settings: false,
             avatar_states: ToggleStates::default(),
-            avatar_draft: None,
+            avatar_window: None,
             available_devices,
             selected_device_index,
+            ui_config_dirty: false,
+            hotkey_manager: None,
+            registered_hotkey: None,
+            calibration: None,
+        };
+        app.register_shortcut();
+        app
+    }
+
+    /// 自動キャリブレーションの開始/中止(設定ページのボタン)
+    fn toggle_calibration(&mut self, window: &MainWindow) {
+        if self.calibration.is_some() {
+            self.calibration = None;
+            window.set_calib_active(false);
+            window.set_calib_guide("中止しました".into());
+            window.set_level(0.0);
+            return;
+        }
+        if self.is_recording {
+            window.set_calib_guide("録音中はキャリブレーションできません".into());
+            return;
+        }
+        let idx = window.get_device_index().max(0) as usize;
+        let device_name = if idx == 0 {
+            None
+        } else {
+            self.available_devices.get(idx).cloned()
+        };
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut recorder = AudioRecorder::new(0.0);
+        if let Err(e) = recorder.start_recording(device_name.as_deref(), tx) {
+            window.set_calib_guide(format!("マイクを開けません: {}", e).into());
+            return;
+        }
+        self.calibration = Some(Calibration {
+            recorder,
+            _rx: rx,
+            phase: 0,
+            phase_start: Instant::now(),
+            noise_samples: Vec::new(),
+            speech_samples: Vec::new(),
+            new_threshold: None,
+            tail_secs: None,
+        });
+        window.set_calib_active(true);
+    }
+
+    /// キャリブレーションの採取とフェーズ進行。tick から毎回呼ぶ
+    fn tick_calibration(&mut self, window: &MainWindow) {
+        let Some(calib) = &mut self.calibration else {
+            return;
+        };
+        let level = calib.recorder.get_max_amplitude();
+        let elapsed = calib.phase_start.elapsed().as_secs_f32();
+        let remaining = (CALIB_PHASE_SECS - elapsed).max(0.0).ceil();
+        match calib.phase {
+            0 => {
+                calib.noise_samples.push(level);
+                window.set_calib_guide(
+                    format!("① 無音のまま待ってください… あと {:.0} 秒", remaining).into(),
+                );
+            }
+            1 => {
+                calib.speech_samples.push(level);
+                window
+                    .set_calib_guide(format!("② 話してください… あと {:.0} 秒", remaining).into());
+            }
+            _ => {
+                if calib.tail_secs.is_none()
+                    && let Some(t) = calib.new_threshold
+                    && level < t
+                {
+                    calib.tail_secs = Some(elapsed);
+                }
+                window.set_calib_guide(
+                    format!("③ もう一度無音にしてください… あと {:.0} 秒", remaining).into(),
+                );
+            }
+        }
+        window.set_level(level);
+        if let Some(t) = calib.new_threshold {
+            window.set_level_below_threshold(level < t);
+        }
+
+        if elapsed < CALIB_PHASE_SECS {
+            return;
+        }
+        match calib.phase {
+            0 => {
+                calib.phase = 1;
+                calib.phase_start = Instant::now();
+            }
+            1 => {
+                let noise = percentile(&calib.noise_samples, 0.95);
+                let speech = percentile(&calib.speech_samples, 0.50);
+                // 無音と発話の幾何平均を推奨 threshold とする
+                let t = (noise * speech).sqrt().clamp(0.001, 0.3);
+                calib.new_threshold = Some(t);
+                calib.phase = 2;
+                calib.phase_start = Instant::now();
+            }
+            _ => self.finish_calibration(window),
         }
     }
 
+    /// 採取結果から推奨値をスライダーに反映する(config への確定は保存ボタン)
+    fn finish_calibration(&mut self, window: &MainWindow) {
+        let Some(calib) = self.calibration.take() else {
+            return;
+        };
+        drop(calib.recorder);
+        let threshold = calib.new_threshold.unwrap_or(self.config.silence_threshold);
+        let duration = (calib.tail_secs.unwrap_or(0.5) + 0.5).clamp(0.5, 3.0);
+        window.set_silence_threshold(threshold);
+        window.set_silence_duration(duration);
+        window.set_calib_active(false);
+        window.set_level(0.0);
+        let noise = percentile(&calib.noise_samples, 0.95);
+        let speech = percentile(&calib.speech_samples, 0.50);
+        if speech < noise * 1.5 {
+            window.set_calib_guide(
+                format!(
+                    "声が小さいか検出できませんでした。暫定値 Threshold={:.3} / Duration={:.1}秒 を入れたのでスライダーで調整し、保存してください",
+                    threshold, duration
+                )
+                .into(),
+            );
+        } else {
+            window.set_calib_guide(
+                format!(
+                    "完了。推奨値 Threshold={:.3} / Duration={:.1}秒 を入れました。保存してください",
+                    threshold, duration
+                )
+                .into(),
+            );
+        }
+    }
+
+    /// config.shortcut_key をグローバルショートカットとして登録し直す。空なら解除のみ
+    fn register_shortcut(&mut self) {
+        if let (Some(manager), Some(hotkey)) = (&self.hotkey_manager, &self.registered_hotkey) {
+            let _ = manager.unregister(*hotkey);
+        }
+        self.registered_hotkey = None;
+        let key = self.config.shortcut_key.trim();
+        if key.is_empty() {
+            return;
+        }
+        if self.hotkey_manager.is_none() {
+            match GlobalHotKeyManager::new() {
+                Ok(m) => self.hotkey_manager = Some(m),
+                Err(e) => {
+                    crate::log!("ホットキーマネージャの作成に失敗: {}", e);
+                    return;
+                }
+            }
+        }
+        let manager = self.hotkey_manager.as_ref().unwrap();
+        match HotKey::from_str(key) {
+            Ok(hotkey) => match manager.register(hotkey) {
+                Ok(()) => self.registered_hotkey = Some(hotkey),
+                Err(e) => crate::log!("ショートカット {} の登録に失敗: {}", key, e),
+            },
+            Err(e) => crate::log!("ショートカット {} の解析に失敗: {}", key, e),
+        }
+    }
+
+    /// 録音の開始/停止をトグルする(録音ボタンとショートカットの共通処理)
+    fn toggle_recording(&mut self, window: &MainWindow) {
+        if self.is_recording {
+            self.is_recording = false;
+            self.on_stop_recording();
+        } else {
+            self.is_recording = true;
+            self.on_start_recording();
+        }
+        self.push_steamvr_snapshot();
+        self.sync_display_to_ui(window);
+    }
+
+    /// 50ms ごとに呼ばれる。チャネルの回収・無音の自動停止・UI への反映をまとめてやる
+    fn tick(&mut self, window: &MainWindow) {
+        // グローバルショートカットのイベントを回収
+        {
+            let mut toggle = false;
+            while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+                if event.state == HotKeyState::Pressed
+                    && self.registered_hotkey.map(|h| h.id()) == Some(event.id)
+                {
+                    toggle = true;
+                }
+            }
+            if toggle {
+                crate::log!("ショートカットキーで録音をトグル");
+                self.toggle_recording(window);
+            }
+        }
+
+        self.tick_calibration(window);
+
+        if let Some(overlay) = &self.steamvr_overlay
+            && overlay.exit_requested()
+        {
+            self.exit_with_steamvr();
+            return;
+        }
+
+        // Grok の加工結果を受け取る
+        if let Some(ref receiver) = self.process_receiver
+            && let Ok(result) = receiver.try_recv()
+        {
+            match result {
+                Ok(output) => {
+                    self.processed_output = output.clone();
+                    self.dispatch_output(&output);
+                    self.status_message = "完了".to_string();
+                }
+                Err(e) => {
+                    crate::log!("Grok error: {}", e);
+                    self.status_message = format!("Grok の処理に失敗: {}", e);
+                    // 失敗したときは認識結果をそのまま出力する
+                    let raw = self.transcribed_text.clone();
+                    self.processed_output = raw.clone();
+                    self.dispatch_output(&raw);
+                }
+            }
+            self.process_receiver = None;
+            self.push_steamvr_snapshot();
+        }
+
+        // オーバーレイからのアクション
+        let steamvr_actions: Vec<OverlayAction> = self
+            .steamvr_overlay
+            .as_ref()
+            .map(|overlay| overlay.action_rx.try_iter().collect())
+            .unwrap_or_default();
+        if !steamvr_actions.is_empty() {
+            for action in steamvr_actions {
+                self.apply_steamvr_action(action);
+            }
+            if let Err(e) = self.config.save() {
+                crate::log!("Failed to save config: {}", e);
+            }
+            self.push_steamvr_snapshot();
+            self.ui_config_dirty = true;
+        }
+
+        // 文字起こしの途中経過・結果
+        if let Some(receiver) = &mut self.transcription_receiver
+            && let Ok(message) = receiver.try_recv()
+        {
+            match message {
+                TranscriptionMessage::Partial(text) => {
+                    self.transcribed_text = text;
+                    self.push_steamvr_snapshot();
+                }
+                TranscriptionMessage::Success(text) => {
+                    self.transcribed_text = text;
+                    self.on_transcription_success();
+                }
+                TranscriptionMessage::Error(error) => {
+                    self.status_message = format!("Transcription failed: {}", error);
+                    self.is_transcribing = false;
+                    self.transcription_receiver = None;
+                    if let Some(rt) = self.tokio_runtime.take() {
+                        rt.shutdown_background();
+                    }
+                }
+            }
+        }
+
+        // 無音が続いたら録音停止
+        if self.is_recording
+            && let Some(recorder) = &self.audio_recorder
+            && recorder.is_silent(self.config.silence_duration_secs)
+        {
+            self.is_recording = false;
+            self.on_stop_recording();
+            self.push_steamvr_snapshot();
+        }
+
+        if self.ui_config_dirty {
+            self.sync_config_to_ui(window);
+            self.ui_config_dirty = false;
+        }
+        self.sync_display_to_ui(window);
+    }
+
     fn on_start_recording(&mut self) {
-        self.status_message = "Recording... Speak now!".to_string();
+        self.status_message = "録音中... 話してください".to_string();
 
         let mut recorder = AudioRecorder::new(self.config.silence_threshold);
         let (chunk_tx, chunk_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
@@ -180,8 +521,8 @@ impl App {
     }
 
     /// SteamVR が終わってアプリごと閉じるとき。録音を止め(文字起こしの結果は待たない)、
-    /// ログを書き切ってからウィンドウを閉じる
-    fn exit_with_steamvr(&mut self, ctx: &egui::Context) {
+    /// ログを書き切ってから終了する
+    fn exit_with_steamvr(&mut self) {
         crate::log!("[App] SteamVR が終わったので終了する");
         if let Some(mut recorder) = self.audio_recorder.take() {
             recorder.stop_recording();
@@ -195,7 +536,7 @@ impl App {
         use std::io::Write;
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        let _ = slint::quit_event_loop();
     }
 
     fn start_streaming_transcription(
@@ -227,15 +568,14 @@ impl App {
         self.tokio_runtime = Some(rt);
     }
 
-    /// 加工が必要か。質問モードに校正はかけない(質問のプロンプトが音声認識ノイズを前提にしているため)
+    /// 加工が必要か
     fn needs_llm(&self) -> bool {
-        (self.config.proofread_enabled && self.config.mode != Mode::Question)
-            || self.config.mode != Mode::Echo
+        self.config.proofread_enabled || self.config.mode != Mode::Echo
     }
 
-    fn on_transcription_success(&mut self, text: String) {
-        self.transcribed_text = text.clone();
-        self.status_message = "Transcription completed!".to_string();
+    fn on_transcription_success(&mut self) {
+        let text = self.transcribed_text.clone();
+        self.status_message = "認識完了".to_string();
         self.is_transcribing = false;
         self.transcription_receiver = None;
         if let Some(rt) = self.tokio_runtime.take() {
@@ -298,7 +638,11 @@ impl App {
                 let _ = tx.send(result);
             });
             self.process_receiver = Some(rx);
-            self.status_message = "Grok で処理中...".to_string();
+            self.status_message = match self.config.mode {
+                Mode::Echo => "校正中...".to_string(),
+                Mode::Translate => "翻訳中...".to_string(),
+                Mode::Question => "質問中...".to_string(),
+            };
         }
         self.push_steamvr_snapshot();
     }
@@ -348,78 +692,13 @@ impl App {
         }
     }
 
-    /// SteamVR が動いているときだけ「キー割り当て変更」(SteamVR の割り当て画面を PC の画面に開く)
-    fn steamvr_bindings_button(&self, ui: &mut egui::Ui) {
-        let Some(overlay) = self.steamvr_overlay.as_ref().filter(|o| o.is_connected()) else {
-            return;
-        };
-        ui.add_space(10.0);
-        ui.separator();
-        if ui.button("キー割り当て変更").clicked() {
-            let _ = overlay
-                .command_tx
-                .send(steamvr::OverlayCommand::OpenBindingUi);
+    /// config を保存し、VR に反映し、排他の結果を UI にも流し直す
+    fn persist_and_push(&mut self, window: &MainWindow) {
+        if let Err(e) = self.config.save() {
+            crate::log!("Failed to save config: {}", e);
         }
-    }
-
-    /// A/B/X/Y の設定の窓(別の窓)。保存すると config.json に書き、VR にも反映する
-    fn avatar_settings_window(&mut self, ctx: &egui::Context) {
-        if self.avatar_draft.is_none() {
-            return;
-        }
-        let mut close = false;
-        let mut save = false;
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("avatar_buttons"),
-            egui::ViewportBuilder::default()
-                .with_title("VR のボタン A/B/X/Y")
-                .with_inner_size([760.0, 560.0]),
-            |ctx, _| {
-                if ctx.input(|i| i.viewport().close_requested()) {
-                    close = true;
-                }
-                let draft = self.avatar_draft.as_mut().expect("checked above");
-                egui::CentralPanel::default()
-                    .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(24.0))
-                    .show(ctx, |ui| {
-                        let all_ok = avatar_settings_ui(ui, draft);
-                        ui.add_space(16.0);
-                        ui.horizontal(|ui| {
-                            let size = egui::vec2(120.0, 40.0);
-                            if ui
-                                .add_enabled(
-                                    all_ok,
-                                    egui::Button::new(egui::RichText::new("保存").size(18.0))
-                                        .min_size(size),
-                                )
-                                .clicked()
-                            {
-                                save = true;
-                            }
-                            if ui
-                                .add(
-                                    egui::Button::new(egui::RichText::new("キャンセル").size(18.0))
-                                        .min_size(size),
-                                )
-                                .clicked()
-                            {
-                                close = true;
-                            }
-                        });
-                    });
-            },
-        );
-        if save && let Some(new) = self.avatar_draft.take() {
-            self.avatar_states
-                .reset_changed(&self.config.avatar_buttons, &new);
-            self.config.avatar_buttons = new;
-            if let Err(e) = self.config.save() {
-                crate::log!("Failed to save config: {}", e);
-            }
-            self.push_steamvr_snapshot();
-        } else if close {
-            self.avatar_draft = None;
-        }
+        self.push_steamvr_snapshot();
+        self.sync_config_to_ui(window);
     }
 
     /// VR オーバーレイ側から受け取ったアクションを Config に適用する。
@@ -486,570 +765,393 @@ impl App {
             }
         }
     }
-}
 
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // SteamVRオーバーレイのアクション(action_rx)はこのupdate()内でしかdrainされない。
-        // 通常のeframeは反応的(次のOS入力/描画イベントまでupdate()を呼ばない)なので、
-        // デスクトップウィンドウを見ていない間(VR内での操作中はまさにこの状態)は
-        // オーバーレイでクリックしてもConfig反映・スナップショット再送が止まってしまい、
-        // オーバーレイ側では古いスナップショットで再描画され続けてチェックが一瞬で戻る。
-        // これを避けるため、SteamVR につながっている間は一定周期で強制的にrepaintさせる。
-        // つながった・終了してほしい、はオーバーレイのスレッドが request_repaint で知らせてくる。
-        if let Some(overlay) = &self.steamvr_overlay {
-            if overlay.exit_requested() {
-                self.exit_with_steamvr(ctx);
+    /// Config → UI(送り先と加工のコントロール)。起動時と、オーバーレイで変わったときに呼ぶ
+    fn sync_config_to_ui(&self, window: &MainWindow) {
+        window.set_clipboard_enabled(self.config.clipboard_enabled);
+        window.set_auto_input_enabled(self.config.auto_input_enabled);
+        window.set_send_enter_enabled(self.config.auto_input_send_enter);
+        window.set_vrchat_enabled(self.config.vrchat_enabled);
+        window.set_proofread_enabled(self.config.proofread_enabled);
+        window.set_mode(match self.config.mode {
+            Mode::Echo => 0,
+            Mode::Translate => 1,
+            Mode::Question => 2,
+        });
+        let langs: Vec<slint::SharedString> = self
+            .config
+            .translate_langs
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect();
+        window.set_lang_list(slint::ModelRc::new(slint::VecModel::from(langs)));
+        window.set_lang_selected(self.config.translate_lang_selected.clone().into());
+    }
+
+    /// 状態 → UI(表示物)。毎 tick 呼ぶ
+    fn sync_display_to_ui(&self, window: &MainWindow) {
+        window.set_status_text(self.status_message.clone().into());
+        window.set_transcribed_text(self.transcribed_text.clone().into());
+        window.set_output_text(self.processed_output.clone().into());
+        window.set_show_output(
+            !self.processed_output.is_empty() && self.processed_output != self.transcribed_text,
+        );
+        window.set_is_recording(self.is_recording);
+        window.set_steamvr_connected(
+            self.steamvr_overlay
+                .as_ref()
+                .map(|o| o.is_connected())
+                .unwrap_or(false),
+        );
+
+        // 警告(API キー未設定 / VR の異常)をまとめて出す
+        let mut warnings: Vec<String> = Vec::new();
+        if self.config.xai_api_key.is_empty() {
+            warnings.push("⚠ xAI API key not set. Please configure in Settings.".to_string());
+        }
+        if let Some(problem) = self.steamvr_overlay.as_ref().and_then(|o| o.problem()) {
+            warnings.push(format!("⚠ {}", problem));
+        }
+        window.set_warning_text(warnings.join("\n").into());
+
+        // 録音の情報(時間・無音・音量)
+        if self.is_recording
+            && let Some(recorder) = &self.audio_recorder
+        {
+            window.set_recording_info(
+                format!(
+                    "録音: {:.1}秒 | 無音: {:.1}秒/{:.1}秒",
+                    recorder.get_recording_duration(),
+                    recorder.get_silence_duration().as_secs_f32(),
+                    self.config.silence_duration_secs,
+                )
+                .into(),
+            );
+            let silence_progress = (recorder.get_silence_duration().as_secs_f32()
+                / self.config.silence_duration_secs)
+                .min(1.0);
+            window.set_silence_progress(silence_progress);
+            let level = recorder.get_max_amplitude();
+            window.set_level(level);
+            window.set_level_below_threshold(level < self.config.silence_threshold);
+        } else if self.calibration.is_none() {
+            window.set_recording_info("".into());
+            window.set_silence_progress(0.0);
+            window.set_level(0.0);
+        }
+    }
+
+    /// A/B/X/Y の設定の窓を開く。保存できたら config に書いて VR にも反映する
+    fn open_avatar_window(&mut self, app: Rc<RefCell<App>>) {
+        if self.avatar_window.is_some() {
+            return;
+        }
+        let avatar_window = match AvatarWindow::new() {
+            Ok(w) => w,
+            Err(e) => {
+                crate::log!("Avatar window を開けない: {}", e);
                 return;
             }
-            if overlay.is_connected() {
-                ctx.request_repaint_after(std::time::Duration::from_millis(100));
-            }
-        }
+        };
+        avatar_window.set_rows(rows_from_buttons(&self.config.avatar_buttons));
 
-        // Grok の加工結果を受け取る。処理中は周期的に poll する
-        if self.process_receiver.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        }
-        if let Some(ref receiver) = self.process_receiver
-            && let Ok(result) = receiver.try_recv()
         {
-            match result {
-                Ok(output) => {
-                    self.processed_output = output.clone();
-                    self.dispatch_output(&output);
-                    self.status_message = "Done!".to_string();
+            let app = app.clone();
+            let weak = avatar_window.as_weak();
+            avatar_window.on_save(move || {
+                let Some(aw) = weak.upgrade() else { return };
+                let mut app = app.borrow_mut();
+                let rows = aw.get_rows();
+                let mut new_buttons: [AvatarButton; 4] = app.config.avatar_buttons.clone();
+                let mut errors: Vec<String> = Vec::new();
+                for (i, row) in rows.iter().enumerate() {
+                    new_buttons[i] = AvatarButton {
+                        param: row.param.to_string(),
+                        kind: match row.kind.as_str() {
+                            "Int" => ParamType::Int,
+                            "Float" => ParamType::Float,
+                            _ => ParamType::Bool,
+                        },
+                        on: row.on.to_string(),
+                        off: row.off.to_string(),
+                    };
+                    errors.push(new_buttons[i].error().unwrap_or_default());
                 }
-                Err(e) => {
-                    crate::log!("Grok error: {}", e);
-                    self.status_message = format!("Grok の処理に失敗: {}", e);
-                    // 失敗したときは認識結果をそのまま出力する
-                    let raw = self.transcribed_text.clone();
-                    self.processed_output = raw.clone();
-                    self.dispatch_output(&raw);
-                }
-            }
-            self.process_receiver = None;
-            self.push_steamvr_snapshot();
-        }
-
-        let steamvr_actions: Vec<OverlayAction> = self
-            .steamvr_overlay
-            .as_ref()
-            .map(|overlay| overlay.action_rx.try_iter().collect())
-            .unwrap_or_default();
-        if !steamvr_actions.is_empty() {
-            for action in steamvr_actions {
-                self.apply_steamvr_action(action);
-            }
-            if let Err(e) = self.config.save() {
-                crate::log!("Failed to save config: {}", e);
-            }
-            self.push_steamvr_snapshot();
-        }
-
-        if let Some(receiver) = &mut self.transcription_receiver
-            && let Ok(message) = receiver.try_recv()
-        {
-            match message {
-                TranscriptionMessage::Partial(text) => {
-                    self.transcribed_text = text;
-                    self.push_steamvr_snapshot();
-                }
-                TranscriptionMessage::Success(text) => self.on_transcription_success(text),
-                TranscriptionMessage::Error(error) => {
-                    self.status_message = format!("Transcription failed: {}", error);
-                    self.is_transcribing = false;
-                    self.transcription_receiver = None;
-                    if let Some(rt) = self.tokio_runtime.take() {
-                        rt.shutdown_background();
+                if errors.iter().any(|e| !e.is_empty()) {
+                    // エラーを表示して閉じない
+                    let mut data: Vec<AvatarButtonData> = rows.iter().collect();
+                    for (i, e) in errors.iter().enumerate() {
+                        data[i].error = e.clone().into();
                     }
+                    aw.set_rows(slint::ModelRc::new(slint::VecModel::from(data)));
+                    aw.set_show_errors(true);
+                    return;
                 }
-            }
-        }
-
-        self.avatar_settings_window(ctx);
-
-        if self.show_settings {
-            egui::Window::new("Settings")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label("xAI API Key:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.settings_xai_api_key)
-                            .password(true)
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.add_space(10.0);
-                    ui.label("Input Device:");
-                    egui::ComboBox::from_id_salt("input_device_combo")
-                        .selected_text(
-                            self.available_devices
-                                .get(self.selected_device_index)
-                                .cloned()
-                                .unwrap_or_default(),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (idx, device_name) in self.available_devices.iter().enumerate() {
-                                ui.selectable_value(
-                                    &mut self.selected_device_index,
-                                    idx,
-                                    device_name,
-                                );
-                            }
-                        });
-                    ui.add_space(10.0);
-                    ui.label("Silence Duration (seconds):");
-                    ui.add(egui::Slider::new(
-                        &mut self.config.silence_duration_secs,
-                        0.5..=10.0,
-                    ));
-                    ui.label("Silence Threshold:");
-                    ui.add(
-                        egui::Slider::new(&mut self.config.silence_threshold, 0.001..=0.3)
-                            .logarithmic(true),
-                    );
-
-                    ui.add_space(10.0);
-                    ui.label("翻訳フォーマット ({source} {translated} が使えます):");
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.config.translate_format)
-                            .desired_rows(2)
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.label("質問フォーマット ({source} {answer} が使えます):");
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.config.question_format)
-                            .desired_rows(3)
-                            .desired_width(f32::INFINITY),
-                    );
-
-                    ui.add_space(10.0);
-                    ui.separator();
-                    if ui.button("VR のボタン A/B/X/Y の設定…").clicked() {
-                        self.avatar_draft = Some(self.config.avatar_buttons.clone());
-                    }
-
-                    self.steamvr_bindings_button(ui);
-
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
-                            self.config.xai_api_key = self.settings_xai_api_key.trim().to_string();
-                            self.config.input_device_name = if self.selected_device_index == 0 {
-                                None
-                            } else {
-                                self.available_devices
-                                    .get(self.selected_device_index)
-                                    .cloned()
-                            };
-                            if let Err(e) = self.config.save() {
-                                crate::log!("Failed to save config: {}", e);
-                            }
-                            self.push_steamvr_snapshot();
-                            self.show_settings = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.settings_xai_api_key = self.config.xai_api_key.clone();
-                            self.selected_device_index = self
-                                .config
-                                .input_device_name
-                                .as_ref()
-                                .and_then(|name| {
-                                    self.available_devices.iter().position(|d| d == name)
-                                })
-                                .unwrap_or(0);
-                            self.show_settings = false;
-                        }
-                    });
-                });
-        }
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("⚙ Settings").clicked() {
-                            self.show_settings = true;
-                        }
-                    });
-                });
-
-                if self.config.xai_api_key.is_empty() {
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        "⚠ xAI API key not set. Please configure in Settings.",
-                    );
+                let old_buttons = app.config.avatar_buttons.clone();
+                app.avatar_states.reset_changed(&old_buttons, &new_buttons);
+                app.config.avatar_buttons = new_buttons;
+                if let Err(e) = app.config.save() {
+                    crate::log!("Failed to save config: {}", e);
                 }
-                if let Some(problem) = self.steamvr_overlay.as_ref().and_then(|o| o.problem()) {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(0xe5, 0x48, 0x4d),
-                        format!("⚠ {}", problem),
-                    );
-                }
-                if !self.status_message.is_empty() {
-                    ui.label(&self.status_message);
-                }
-                if self.is_recording
-                    && let Some(recorder) = &self.audio_recorder
-                {
-                    ui.label(format!(
-                        "Recording: {:.1}s | Silence: {:.1}s/{:.1}s",
-                        recorder.get_recording_duration(),
-                        recorder.get_silence_duration().as_secs_f32(),
-                        self.config.silence_duration_secs,
-                    ));
-                }
-
-                ui.add_space(10.0);
-
-                let button_text = if self.is_recording {
-                    "⏹ Stop"
-                } else {
-                    "⏺ Start"
-                };
-                let button_size = egui::vec2(300.0, 60.0);
-
-                let silence_progress = if self.is_recording {
-                    self.audio_recorder
-                        .as_ref()
-                        .map(|recorder| {
-                            (recorder.get_silence_duration().as_secs_f32()
-                                / self.config.silence_duration_secs)
-                                .min(1.0)
-                        })
-                        .unwrap_or(0.0)
-                } else {
-                    0.0
-                };
-
-                let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
-                let visuals = ui.style().interact(&response);
-
-                ui.painter()
-                    .rect_filled(rect, visuals.rounding, visuals.bg_fill);
-
-                if self.is_recording {
-                    let fill_height = rect.height() * (1.0 - silence_progress);
-                    if fill_height > 0.0 {
-                        let progress_rect = egui::Rect::from_min_size(
-                            egui::pos2(rect.min.x, rect.max.y - fill_height),
-                            egui::vec2(rect.width(), fill_height),
-                        );
-                        ui.painter().rect_filled(
-                            progress_rect,
-                            visuals.rounding,
-                            egui::Color32::from_rgb(100, 200, 255),
-                        );
-                    }
-                }
-
-                ui.painter()
-                    .rect_stroke(rect, visuals.rounding, visuals.bg_stroke);
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    button_text,
-                    egui::FontId::proportional(24.0),
-                    visuals.text_color(),
-                );
-
-                if response.clicked() {
-                    if self.is_recording {
-                        self.is_recording = false;
-                        self.on_stop_recording();
-                    } else {
-                        self.is_recording = true;
-                        self.on_start_recording();
-                    }
-                    self.push_steamvr_snapshot();
-                }
-
-                ui.add_space(10.0);
-
-                if self.is_recording {
-                    if let Some(recorder) = &self.audio_recorder {
-                        let max_amplitude = recorder.get_max_amplitude();
-                        let bar_width = 300.0;
-                        let bar_height = 10.0;
-                        let clipped_amplitude = max_amplitude.min(1.2);
-                        let bar_fill_width = (clipped_amplitude / 1.2) * bar_width;
-
-                        let (bar_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(bar_width, bar_height),
-                            egui::Sense::hover(),
-                        );
-
-                        ui.painter().rect_filled(
-                            bar_rect,
-                            2.0,
-                            egui::Color32::from_rgb(50, 50, 50),
-                        );
-
-                        if bar_fill_width > 0.0 {
-                            let fill_rect = egui::Rect::from_min_size(
-                                bar_rect.min,
-                                egui::vec2(bar_fill_width, bar_height),
-                            );
-                            let color = if max_amplitude < self.config.silence_threshold {
-                                egui::Color32::from_rgb(150, 150, 150)
-                            } else if max_amplitude < 1.0 {
-                                egui::Color32::from_rgb(0, 200, 0)
-                            } else {
-                                egui::Color32::from_rgb(255, 0, 0)
-                            };
-                            ui.painter().rect_filled(fill_rect, 2.0, color);
-                        }
-
-                        ui.painter().rect_stroke(
-                            bar_rect,
-                            2.0,
-                            egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 100)),
-                        );
-
-                        ui.label(format!("Level: {:.3}", max_amplitude));
-                    }
-
-                    ui.add_space(10.0);
-                }
-                ui.label("Transcribed:");
-                ui.add_sized(
-                    [300.0, 60.0],
-                    egui::TextEdit::multiline(&mut self.transcribed_text).interactive(false),
-                );
-
-                if !self.processed_output.is_empty()
-                    && self.processed_output != self.transcribed_text
-                {
-                    ui.add_space(5.0);
-                    ui.label("出力:");
-                    ui.add_sized(
-                        [300.0, 60.0],
-                        egui::TextEdit::multiline(&mut self.processed_output).interactive(false),
-                    );
-                }
-
-                ui.add_space(10.0);
-
-                let mut changed = false;
-
-                egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
-                    egui::Frame::none()
-                        .inner_margin(egui::Margin::symmetric(30.0, 0.0))
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.add_space(5.0);
-                                ui.set_width(300.0);
-
-                                changed |= ui
-                                    .checkbox(
-                                        &mut self.config.clipboard_enabled,
-                                        "Copy to clipboard",
-                                    )
-                                    .changed();
-
-                                let auto_input_changed = ui
-                                    .checkbox(
-                                        &mut self.config.auto_input_enabled,
-                                        "Input to active window",
-                                    )
-                                    .changed();
-                                if auto_input_changed && self.config.auto_input_enabled {
-                                    self.config.enable_auto_input_exclusive();
-                                }
-                                changed |= auto_input_changed;
-
-                                ui.indent("send_enter_indent", |ui| {
-                                    changed |= ui
-                                        .add_enabled(
-                                            self.config.auto_input_enabled,
-                                            egui::Checkbox::new(
-                                                &mut self.config.auto_input_send_enter,
-                                                "Send Enter after input",
-                                            ),
-                                        )
-                                        .changed();
-                                });
-
-                                let vrchat_changed = ui
-                                    .checkbox(&mut self.config.vrchat_enabled, "Input to VRChat")
-                                    .changed();
-                                if vrchat_changed && self.config.vrchat_enabled {
-                                    self.config.enable_vrchat_exclusive();
-                                }
-                                changed |= vrchat_changed;
-
-                                ui.separator();
-
-                                changed |= ui
-                                    .checkbox(&mut self.config.proofread_enabled, "校正 (Grok)")
-                                    .changed();
-
-                                ui.horizontal(|ui| {
-                                    ui.label("モード:");
-                                    for mode in Mode::ALL {
-                                        if ui
-                                            .selectable_label(
-                                                self.config.mode == mode,
-                                                mode.label(),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.config.mode = mode;
-                                            changed = true;
-                                        }
-                                    }
-                                });
-
-                                if self.config.mode == Mode::Translate {
-                                    ui.indent("translate_lang_indent", |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label("翻訳先言語:");
-                                            egui::ComboBox::from_id_salt("translate_lang_combo")
-                                                .selected_text(
-                                                    match self.config.translate_lang_preset.as_str()
-                                                    {
-                                                        "EN" => "EN",
-                                                        "CN" => "CN",
-                                                        _ => "自由記述",
-                                                    },
-                                                )
-                                                .show_ui(ui, |ui| {
-                                                    for (value, label) in [
-                                                        ("EN", "EN"),
-                                                        ("CN", "CN"),
-                                                        ("CUSTOM", "自由記述"),
-                                                    ] {
-                                                        if ui
-                                                            .selectable_value(
-                                                                &mut self
-                                                                    .config
-                                                                    .translate_lang_preset,
-                                                                value.to_string(),
-                                                                label,
-                                                            )
-                                                            .changed()
-                                                        {
-                                                            changed = true;
-                                                        }
-                                                    }
-                                                });
-                                        });
-                                        if self.config.translate_lang_preset == "CUSTOM" {
-                                            changed |= ui
-                                                .text_edit_singleline(
-                                                    &mut self.config.translate_lang_custom,
-                                                )
-                                                .changed();
-                                        }
-                                    });
-                                }
-
-                                ui.add_space(5.0);
-                                if ui.button("📝 call QvPen").clicked()
-                                    && let Err(e) = auto_input::call_qvpen()
-                                {
-                                    crate::log!("call_qvpen error: {}", e);
-                                }
-                                ui.add_space(5.0);
-                            })
-                        })
-                });
-
-                if changed {
-                    if let Err(e) = self.config.save() {
-                        crate::log!("Failed to save config: {}", e);
-                    }
-                    self.push_steamvr_snapshot();
-                }
+                app.push_steamvr_snapshot();
+                let _ = aw.hide();
+                app.avatar_window = None;
             });
-        });
+        }
+        {
+            let weak = avatar_window.as_weak();
+            avatar_window.on_cancel(move || {
+                let Some(aw) = weak.upgrade() else { return };
+                let _ = aw.hide();
+                app.borrow_mut().avatar_window = None;
+            });
+        }
 
-        if self.is_recording {
-            if let Some(recorder) = &self.audio_recorder
-                && recorder.is_silent(self.config.silence_duration_secs)
-            {
-                self.is_recording = false;
-                self.on_stop_recording();
-                self.push_steamvr_snapshot();
-            }
-            ctx.request_repaint();
+        if let Err(e) = avatar_window.show() {
+            crate::log!("Avatar window を表示できない: {}", e);
+            return;
         }
-        if self.is_transcribing {
-            ctx.request_repaint();
-        }
+        self.avatar_window = Some(avatar_window);
     }
 }
 
-/// A/B/X/Y の設定の中身。すべて正しければ true
-fn avatar_settings_ui(ui: &mut egui::Ui, draft: &mut [AvatarButton; 4]) -> bool {
-    ui.spacing_mut().item_spacing = egui::vec2(12.0, 10.0);
-    ui.label(
-        egui::RichText::new(
-            "VR のパネル右端の丸いボタン。押すたびにオン/オフが切り替わり、\
-             その値を VRChat のアバターパラメーターに送ります。名前が空のボタンは使いません。",
-        )
-        .size(15.0)
-        .color(egui::Color32::from_gray(170)),
-    );
-    ui.add_space(8.0);
-    let mut all_ok = true;
-    for (i, b) in draft.iter_mut().enumerate() {
-        egui::Frame::group(ui.style())
-            .rounding(10.0)
-            .inner_margin(egui::Margin::symmetric(16.0, 12.0))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(LABELS[i]).size(28.0).strong());
-                    ui.add_space(8.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut b.param)
-                            .hint_text("パラメーター名（例: Hat）")
-                            .font(egui::FontId::proportional(17.0))
-                            .desired_width(200.0),
-                    );
-                    let before = b.kind;
-                    egui::ComboBox::from_id_salt(("avatar_kind", i))
-                        .selected_text(b.kind.label())
-                        .width(150.0)
-                        .show_ui(ui, |ui| {
-                            for k in ParamType::ALL {
-                                ui.selectable_value(&mut b.kind, k, k.label());
-                            }
-                        });
-                    if b.kind != before {
-                        let (on, off) = b.kind.default_values();
-                        b.on = on.to_string();
-                        b.off = off.to_string();
-                    }
-                    for (caption, value) in [("オン", &mut b.on), ("オフ", &mut b.off)] {
-                        ui.label(egui::RichText::new(caption).size(15.0));
-                        if b.kind == ParamType::Bool {
-                            egui::ComboBox::from_id_salt(("avatar_bool", i, caption))
-                                .selected_text(value.as_str())
-                                .width(70.0)
-                                .show_ui(ui, |ui| {
-                                    for v in ["true", "false"] {
-                                        ui.selectable_value(value, v.to_string(), v);
-                                    }
-                                });
-                        } else {
-                            ui.add(
-                                egui::TextEdit::singleline(value)
-                                    .font(egui::FontId::proportional(17.0))
-                                    .desired_width(60.0),
-                            );
-                        }
-                    }
-                });
-                if let Some(e) = b.error() {
-                    all_ok = false;
-                    ui.colored_label(egui::Color32::from_rgb(0xe5, 0x48, 0x4d), e);
-                }
-            });
+/// ウィンドウの各ボタン・コントロールを App に結びつける
+fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_start_stop(move || {
+            let Some(window) = weak.upgrade() else { return };
+            app.borrow_mut().toggle_recording(&window);
+        });
     }
-    all_ok
+
+    // 送り先・加工の切り替えは即座に保存して VR にも反映する
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_toggle_clipboard(move |v| {
+            let Some(window) = weak.upgrade() else { return };
+            let mut app = app.borrow_mut();
+            app.config.clipboard_enabled = v;
+            app.persist_and_push(&window);
+        });
+    }
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_toggle_auto_input(move |v| {
+            let Some(window) = weak.upgrade() else { return };
+            let mut app = app.borrow_mut();
+            if v {
+                app.config.enable_auto_input_exclusive();
+            } else {
+                app.config.auto_input_enabled = false;
+            }
+            app.persist_and_push(&window);
+        });
+    }
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_toggle_send_enter(move |v| {
+            let Some(window) = weak.upgrade() else { return };
+            let mut app = app.borrow_mut();
+            app.config.auto_input_send_enter = v;
+            app.persist_and_push(&window);
+        });
+    }
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_toggle_vrchat(move |v| {
+            let Some(window) = weak.upgrade() else { return };
+            let mut app = app.borrow_mut();
+            if v {
+                app.config.enable_vrchat_exclusive();
+            } else {
+                app.config.vrchat_enabled = false;
+            }
+            app.persist_and_push(&window);
+        });
+    }
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_toggle_proofread(move |v| {
+            let Some(window) = weak.upgrade() else { return };
+            let mut app = app.borrow_mut();
+            app.config.proofread_enabled = v;
+            app.persist_and_push(&window);
+        });
+    }
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_set_mode(move |m| {
+            let Some(window) = weak.upgrade() else { return };
+            let mut app = app.borrow_mut();
+            app.config.mode = match m {
+                1 => Mode::Translate,
+                2 => Mode::Question,
+                _ => Mode::Echo,
+            };
+            app.persist_and_push(&window);
+        });
+    }
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_set_lang_selected(move |lang| {
+            let Some(window) = weak.upgrade() else { return };
+            let mut app = app.borrow_mut();
+            app.config.translate_lang_selected = lang.to_string();
+            app.persist_and_push(&window);
+        });
+    }
+    {
+        window.on_call_qvpen(move || {
+            if let Err(e) = auto_input::call_qvpen() {
+                crate::log!("call_qvpen error: {}", e);
+            }
+        });
+    }
+
+    // 設定ページ
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_start_calibration(move || {
+            let Some(window) = weak.upgrade() else { return };
+            app.borrow_mut().toggle_calibration(&window);
+        });
+    }
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_open_settings(move || {
+            let Some(window) = weak.upgrade() else { return };
+            let app = app.borrow();
+            // 保存前の書きかけを捨てて config の今の値を出す
+            window.set_settings_api_key(app.config.xai_api_key.clone().into());
+            window.set_device_index(app.selected_device_index as i32);
+            window.set_silence_duration(app.config.silence_duration_secs);
+            window.set_silence_threshold(app.config.silence_threshold);
+            window.set_translate_format(app.config.translate_format.clone().into());
+            window.set_question_format(app.config.question_format.clone().into());
+            window.set_translate_langs_text(app.config.translate_langs.join("/").into());
+            window.set_shortcut_key(app.config.shortcut_key.clone().into());
+            window.set_show_settings(true);
+        });
+    }
+    {
+        let app = app.clone();
+        let weak = window.as_weak();
+        window.on_save_settings(move || {
+            let Some(window) = weak.upgrade() else { return };
+            let mut app = app.borrow_mut();
+            app.config.xai_api_key = window.get_settings_api_key().trim().to_string();
+            let idx = window.get_device_index().max(0) as usize;
+            app.selected_device_index = idx;
+            app.config.input_device_name = if idx == 0 {
+                None
+            } else {
+                app.available_devices.get(idx).cloned()
+            };
+            app.config.silence_duration_secs = window.get_silence_duration();
+            app.config.silence_threshold = window.get_silence_threshold();
+            app.config.translate_format = window.get_translate_format().to_string();
+            app.config.question_format = window.get_question_format().to_string();
+            app.config.translate_langs =
+                crate::config::parse_translate_langs(&window.get_translate_langs_text());
+            if !app
+                .config
+                .translate_langs
+                .contains(&app.config.translate_lang_selected)
+            {
+                app.config.translate_lang_selected = app.config.translate_langs[0].clone();
+            }
+            app.config.shortcut_key = window.get_shortcut_key().trim().to_string();
+            app.register_shortcut();
+            if let Err(e) = app.config.save() {
+                crate::log!("Failed to save config: {}", e);
+            }
+            app.push_steamvr_snapshot();
+            app.sync_config_to_ui(&window);
+            window.set_show_settings(false);
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_cancel_settings(move || {
+            if let Some(window) = weak.upgrade() {
+                window.set_show_settings(false);
+            }
+        });
+    }
+    {
+        let app = app.clone();
+        window.on_open_avatar_settings(move || {
+            let app_for_window = app.clone();
+            app_for_window
+                .borrow_mut()
+                .open_avatar_window(app_for_window.clone());
+        });
+    }
+    {
+        let app = app.clone();
+        window.on_open_bindings(move || {
+            if let Some(overlay) = &app.borrow().steamvr_overlay {
+                let _ = overlay
+                    .command_tx
+                    .send(steamvr::OverlayCommand::OpenBindingUi);
+            }
+        });
+    }
+}
+
+/// Config の A/B/X/Y 設定を Slint のモデルに変換する
+fn rows_from_buttons(buttons: &[AvatarButton; 4]) -> slint::ModelRc<AvatarButtonData> {
+    let rows: Vec<AvatarButtonData> = buttons
+        .iter()
+        .enumerate()
+        .map(|(i, b)| AvatarButtonData {
+            label: avatar_buttons::LABELS[i].into(),
+            param: b.param.clone().into(),
+            kind: b.kind.label().into(),
+            on: b.on.clone().into(),
+            off: b.off.clone().into(),
+            error: "".into(),
+        })
+        .collect();
+    slint::ModelRc::new(slint::VecModel::from(rows))
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use crate::percentile;
+    use global_hotkey::hotkey::HotKey;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_shortcut_key_parse() {
+        assert!(HotKey::from_str("F9").is_ok());
+        assert!(HotKey::from_str("Ctrl+Shift+F9").is_ok());
+        assert!(HotKey::from_str("ctrl+shift+r").is_ok());
+        assert!(HotKey::from_str("not a key").is_err());
+    }
+
+    #[test]
+    fn test_percentile() {
+        assert_eq!(percentile(&[], 0.5), 0.0);
+        assert_eq!(percentile(&[0.1, 0.2, 0.3], 0.0), 0.1);
+        assert_eq!(percentile(&[0.1, 0.2, 0.3], 0.5), 0.2);
+        assert_eq!(percentile(&[0.1, 0.2, 0.3], 0.95), 0.3);
+        // 幾何平均の推奨値が無音と発話の間に入る
+        let noise = percentile(&[0.01; 100], 0.95);
+        let speech = percentile(&[0.3; 100], 0.50);
+        let t = (noise * speech).sqrt().clamp(0.001, 0.3);
+        assert!(noise < t && t < speech);
+    }
 }

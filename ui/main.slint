@@ -1,0 +1,506 @@
+import { Button, CheckBox, ComboBox, LineEdit, TextEdit, Slider, GroupBox, ScrollView, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+// A/B/X/Y ボタン1個分の設定
+export struct AvatarButtonData {
+    label: string,   // "A" / "B" / "X" / "Y"
+    param: string,
+    kind: string,    // "Bool" | "Int" | "Float"
+    on: string,
+    off: string,
+    error: string,   // 空なら OK
+}
+
+// 録音ボタン。録音中は赤く、無音の進み具合を下からの塗りで示す
+component RecordButton inherits Rectangle {
+    in property <bool> recording: false;
+    // 0.0 (話している) → 1.0 (無音が閾値まで進んだ)
+    in property <float> silence-progress: 0.0;
+    callback clicked();
+
+    height: 64px;
+    border-radius: 12px;
+    background: recording ? #c42b1c : (touch.pressed ? #505050 : (touch.has-hover ? #484848 : #3c3c3c));
+
+    // 無音の進行(下から減っていく水色の帯)
+    if recording: Rectangle {
+        x: 0;
+        width: parent.width;
+        y: parent.height * silence-progress;
+        height: parent.height * (1 - silence-progress);
+        border-radius: 12px;
+        background: #4aa3d866;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: recording ? "■ 停止" : "● 録音";
+        color: #ffffff;
+        font-size: 22px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// 音量バー
+component LevelBar inherits Rectangle {
+    in property <float> level: 0.0;           // 0 〜 (1.2 で打ち止め)
+    in property <bool> below-threshold: false;
+
+    height: 10px;
+    border-radius: 5px;
+    background: #555555;
+    border-width: 1px;
+    border-color: #777777;
+
+    Rectangle {
+        x: 0;
+        width: parent.width * min(level / 1.2, 1.0);
+        height: parent.height;
+        border-radius: 5px;
+        background: below-threshold ? #969696 : (level < 1.0 ? #00c800 : #ff2020);
+    }
+}
+
+// モード切り替えの3連ボタン
+component ModeSegment inherits HorizontalLayout {
+    in-out property <int> mode: 0; // 0=エコー 1=翻訳 2=質問
+    callback mode-changed(int);
+
+    spacing: 0px;
+    for label[i] in ["エコー", "翻訳", "質問 (AI)"]: Button {
+        text: label;
+        // checkable だとボタン自身が checked を持って複数選択状態になるので、
+        // 選択中は primary の色で表すだけにする
+        primary: root.mode == i;
+        clicked => {
+            root.mode = i;
+            root.mode-changed(i);
+        }
+    }
+}
+
+export component AvatarWindow inherits Window {
+    title: "VR のボタン A/B/X/Y";
+    width: 860px;
+    height: 620px;
+
+    in-out property <[AvatarButtonData]> rows: [];
+    in property <bool> show-errors: false;
+    callback save();
+    callback cancel();
+
+    VerticalBox {
+        padding: 20px;
+        spacing: 10px;
+        Text {
+            text: "VR のパネル右端の丸いボタン。押すたびにオン/オフが切り替わり、その値を VRChat のアバターパラメーターに送ります。名前が空のボタンは使いません。";
+            wrap: word-wrap;
+            color: #aaaaaa;
+        }
+        ScrollView {
+            VerticalBox {
+                spacing: 10px;
+                for row[i] in rows: Rectangle {
+                    border-radius: 10px;
+                    background: #ffffff10;
+                    VerticalBox {
+                        padding: 12px;
+                        spacing: 6px;
+                        HorizontalBox {
+                            spacing: 10px;
+                            Text {
+                                text: row.label;
+                                font-size: 26px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                            LineEdit {
+                                text <=> row.param;
+                                placeholder-text: "パラメーター名（例: Hat）";
+                                min-width: 170px;
+                            }
+                            ComboBox {
+                                model: ["Bool", "Int", "Float"];
+                                current-value <=> row.kind;
+                                selected(v) => {
+                                    // 型を変えたら値は既定に戻す
+                                    if v == "Bool" {
+                                        row.on = "true";
+                                        row.off = "false";
+                                    } else if v == "Int" {
+                                        row.on = "1";
+                                        row.off = "0";
+                                    } else {
+                                        row.on = "1.0";
+                                        row.off = "0.0";
+                                    }
+                                }
+                            }
+                            Text { text: "オン"; vertical-alignment: center; }
+                            if row.kind == "Bool": ComboBox {
+                                model: ["true", "false"];
+                                current-value <=> row.on;
+                            }
+                            if row.kind != "Bool": LineEdit {
+                                text <=> row.on;
+                                max-width: 70px;
+                            }
+                            Text { text: "オフ"; vertical-alignment: center; }
+                            if row.kind == "Bool": ComboBox {
+                                model: ["true", "false"];
+                                current-value <=> row.off;
+                            }
+                            if row.kind != "Bool": LineEdit {
+                                text <=> row.off;
+                                max-width: 70px;
+                            }
+                        }
+                        if show-errors && row.error != "": Text {
+                            text: row.error;
+                            color: #e5484d;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+        HorizontalBox {
+            spacing: 10px;
+            alignment: start;
+            Button {
+                text: "保存";
+                primary: true;
+                min-width: 120px;
+                min-height: 40px;
+                clicked => { root.save(); }
+            }
+            Button {
+                text: "キャンセル";
+                min-width: 120px;
+                min-height: 40px;
+                clicked => { root.cancel(); }
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "voxtype";
+    icon: @image-url("../assets/voxtype.png");
+    min-width: 400px;
+    min-height: 700px;
+
+    // --- 表示用(Rust から書き込む) ---
+    in property <string> status-text: "";
+    in property <string> warning-text: "";
+    in property <string> transcribed-text: "";
+    in property <string> output-text: "";
+    in property <bool> show-output: false;
+    in property <bool> is-recording: false;
+    in property <string> recording-info: "";
+    in property <float> silence-progress: 0.0;
+    in property <float> level: 0.0;
+    in property <bool> level-below-threshold: false;
+    in property <bool> steamvr-connected: false;
+
+    // --- 送り先と加工(UI と Rust で同期する) ---
+    in-out property <bool> clipboard-enabled: true;
+    in-out property <bool> auto-input-enabled: false;
+    in-out property <bool> send-enter-enabled: true;
+    in-out property <bool> vrchat-enabled: false;
+    in-out property <bool> proofread-enabled: false;
+    in-out property <int> mode: 0;
+    // 翻訳先言語の候補(設定ページで編集)と現在の選択
+    in property <[string]> lang-list: [];
+    in-out property <string> lang-selected: "";
+
+    // --- 設定ページ ---
+    in-out property <bool> show-settings: false;
+    in-out property <string> settings-api-key: "";
+    in property <[string]> devices: [];
+    in-out property <int> device-index: 0;
+    in-out property <float> silence-duration: 1.0;
+    in-out property <float> silence-threshold: 0.03;
+    in-out property <string> translate-format: "";
+    in-out property <string> question-format: "";
+    // 翻訳先言語の候補リスト(設定ページの編集用、`/` 区切りテキスト)
+    in-out property <string> translate-langs-text: "";
+    // 録音開始/停止のグローバルショートカットキー(空で無効)
+    in-out property <string> shortcut-key: "";
+    // 自動キャリブレーション
+    in-out property <bool> calib-active: false;
+    in-out property <string> calib-guide: "";
+
+    // --- コールバック ---
+    callback start-stop();
+    callback start-calibration();
+    callback toggle-clipboard(bool);
+    callback toggle-auto-input(bool);
+    callback toggle-send-enter(bool);
+    callback toggle-vrchat(bool);
+    callback toggle-proofread(bool);
+    callback set-mode(int);
+    callback set-lang-selected(string);
+    callback call-qvpen();
+    callback open-settings();
+    callback save-settings();
+    callback cancel-settings();
+    callback open-avatar-settings();
+    callback open-bindings();
+
+    // ============ メインのページ ============
+    if !show-settings: VerticalBox {
+        padding: 14px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: "voxtype";
+                font-size: 20px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "⚙ 設定";
+                clicked => { root.open-settings(); }
+            }
+        }
+
+        if warning-text != "": Text {
+            text: warning-text;
+            color: #e5484d;
+            wrap: word-wrap;
+        }
+        if status-text != "": Text {
+            text: status-text;
+            wrap: word-wrap;
+            horizontal-alignment: center;
+        }
+        if is-recording && recording-info != "": Text {
+            text: recording-info;
+            horizontal-alignment: center;
+            color: #aaaaaa;
+        }
+
+        RecordButton {
+            recording: is-recording;
+            silence-progress: silence-progress;
+            clicked => { root.start-stop(); }
+        }
+
+        if is-recording: VerticalBox {
+            spacing: 2px;
+            LevelBar {
+                level: level;
+                below-threshold: level-below-threshold;
+            }
+            Text {
+                text: "音量: " + round(level * 1000) / 1000;
+                font-size: 12px;
+                color: #aaaaaa;
+            }
+        }
+
+        Text { text: "認識結果"; }
+        TextEdit {
+            text: transcribed-text;
+            read-only: true;
+            min-height: 64px;
+        }
+
+        if show-output: VerticalBox {
+            spacing: 4px;
+            Text { text: "出力"; }
+            // 高さは3行分で固定。超えた分は TextEdit 内でスクロールする
+            TextEdit {
+                text: output-text;
+                read-only: true;
+                height: 76px;
+            }
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        GroupBox {
+            title: "送り先";
+            VerticalBox {
+                spacing: 4px;
+                padding-left: 8px;
+                CheckBox {
+                    text: "クリップボードにコピー";
+                    checked <=> root.clipboard-enabled;
+                    toggled => { root.toggle-clipboard(self.checked); }
+                }
+                CheckBox {
+                    text: "アクティブなウィンドウに入力";
+                    checked <=> root.auto-input-enabled;
+                    toggled => { root.toggle-auto-input(self.checked); }
+                }
+                CheckBox {
+                    text: "入力後に Enter を送る";
+                    enabled: auto-input-enabled;
+                    checked <=> root.send-enter-enabled;
+                    toggled => { root.toggle-send-enter(self.checked); }
+                }
+                CheckBox {
+                    text: "VRChat に入力";
+                    checked <=> root.vrchat-enabled;
+                    toggled => { root.toggle-vrchat(self.checked); }
+                }
+            }
+        }
+
+        GroupBox {
+            title: "加工";
+            VerticalBox {
+                spacing: 6px;
+                padding-left: 8px;
+                CheckBox {
+                    text: "校正: フィラー除去・言い間違い修正";
+                    checked <=> root.proofread-enabled;
+                    toggled => { root.toggle-proofread(self.checked); }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "モード:"; vertical-alignment: center; }
+                    ModeSegment {
+                        mode <=> root.mode;
+                        mode-changed(m) => { root.set-mode(m); }
+                    }
+                }
+                if mode == 1: HorizontalBox {
+                    spacing: 8px;
+                    padding-left: 16px;
+                    Text { text: "翻訳先言語:"; vertical-alignment: center; }
+                    ComboBox {
+                        model: root.lang-list;
+                        current-value <=> root.lang-selected;
+                        selected(v) => { root.set-lang-selected(v); }
+                    }
+                }
+            }
+        }
+
+        Button {
+            text: "📝 QvPen を呼ぶ";
+            clicked => { root.call-qvpen(); }
+        }
+    }
+
+    // ============ 設定ページ ============
+    if show-settings: VerticalBox {
+        padding: 14px;
+        spacing: 8px;
+
+        Text {
+            text: "設定";
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        ScrollView {
+            VerticalBox {
+                spacing: 8px;
+                alignment: start;
+
+                Text { text: "xAI API キー:"; }
+                LineEdit {
+                    text <=> root.settings-api-key;
+                    input-type: password;
+                }
+
+                Text { text: "入力デバイス:"; }
+                ComboBox {
+                    model: root.devices;
+                    current-index <=> root.device-index;
+                }
+
+                Text { text: "無音とみなす時間 (秒): " + round(silence-duration * 10) / 10; }
+                Slider {
+                    minimum: 0.5;
+                    maximum: 10.0;
+                    value <=> root.silence-duration;
+                }
+
+                Text { text: "無音とみなす音量: " + round(silence-threshold * 1000) / 1000; }
+                Slider {
+                    minimum: 0.001;
+                    maximum: 0.3;
+                    value <=> root.silence-threshold;
+                }
+
+                if root.calib-guide != "": Text {
+                    text: root.calib-guide;
+                    color: #d69c46;
+                    font-weight: 700;
+                    wrap: word-wrap;
+                }
+                if root.calib-active: LevelBar {
+                    level: root.level;
+                    below-threshold: root.level-below-threshold;
+                }
+                Button {
+                    text: root.calib-active ? "中止" : "🎤 自動キャリブレーション (無音5秒 → 発話5秒 → 無音5秒)";
+                    primary: !root.calib-active;
+                    min-height: 44px;
+                    clicked => { root.start-calibration(); }
+                }
+
+                Text { text: "ショートカットキー (録音開始/停止、空欄で無効):"; }
+                LineEdit {
+                    text <=> root.shortcut-key;
+                    placeholder-text: "例: F9, Ctrl+Shift+R";
+                }
+
+                Text { text: "翻訳先言語の候補 (/ 区切り、先頭が初期選択):"; }
+                LineEdit {
+                    text <=> root.translate-langs-text;
+                    placeholder-text: "例: ZH/EN";
+                }
+
+                Text { text: "翻訳フォーマット ({source} {translated} が使えます):"; }
+                TextEdit {
+                    text <=> root.translate-format;
+                    min-height: 48px;
+                }
+
+                Text { text: "質問フォーマット ({source} {answer} が使えます):"; }
+                TextEdit {
+                    text <=> root.question-format;
+                    min-height: 64px;
+                }
+
+                Button {
+                    text: "VR のボタン A/B/X/Y の設定…";
+                    clicked => { root.open-avatar-settings(); }
+                }
+
+                if steamvr-connected: Button {
+                    text: "キー割り当て変更";
+                    clicked => { root.open-bindings(); }
+                }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 10px;
+            alignment: start;
+            Button {
+                text: "保存";
+                primary: true;
+                min-width: 120px;
+                clicked => { root.save-settings(); }
+            }
+            Button {
+                text: "キャンセル";
+                min-width: 120px;
+                clicked => { root.cancel-settings(); }
+            }
+        }
+    }
+}

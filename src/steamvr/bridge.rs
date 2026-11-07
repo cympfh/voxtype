@@ -81,37 +81,37 @@ pub struct OverlayField {
 pub fn overlay_fields(snapshot: &OverlaySnapshot) -> Vec<OverlayField> {
     vec![
         OverlayField {
-            label: "Copy to clipboard",
+            label: "クリップボードにコピー",
             enabled: snapshot.clipboard_enabled,
             indent: false,
             action: OverlayAction::ToggleClipboard,
         },
         OverlayField {
-            label: "Input to active window",
+            label: "アクティブなウィンドウに入力",
             enabled: snapshot.auto_input_enabled,
             indent: false,
             action: OverlayAction::ToggleAutoInput,
         },
         OverlayField {
-            label: "Send Enter after input",
+            label: "入力後に Enter を送る",
             enabled: snapshot.auto_input_send_enter,
             indent: true,
             action: OverlayAction::ToggleAutoInputSendEnter,
         },
         OverlayField {
-            label: "Input to VRChat",
+            label: "VRChat に入力",
             enabled: snapshot.vrchat_enabled,
             indent: false,
             action: OverlayAction::ToggleVrchat,
         },
         OverlayField {
-            label: "校正 (Grok)",
+            label: "校正",
             enabled: snapshot.proofread_enabled,
             indent: false,
             action: OverlayAction::ToggleProofread,
         },
         OverlayField {
-            label: "エコー（そのまま）",
+            label: "エコー",
             enabled: snapshot.mode == Mode::Echo,
             indent: false,
             action: OverlayAction::SetMode(Mode::Echo),
@@ -200,27 +200,15 @@ impl OverlayHandle {
 /// SteamVR オーバーレイのスレッドを起動する(Windows では常に Some、それ以外は None)。
 /// SteamVR が動いていなくてもよい: スレッドが SteamVR の起動を待ち、来たらつなぐ(`is_connected`)。
 /// つないだあとに SteamVR が終わったら `exit_requested` が立つので、アプリは終了する。
-/// `egui_ctx` は知らせたときにデスクトップの画面をすぐ起こすため。
+/// デスクトップ GUI は周期的にハンドルを poll する(Slint 版では常時タイマーが回っている)。
 /// `width_m` はオーバーレイの表示幅(メートル、Config の `steamvr_overlay_width_m`)。
 #[cfg(windows)]
-pub fn start(
-    initial: OverlaySnapshot,
-    width_m: f32,
-    egui_ctx: egui::Context,
-) -> Option<OverlayHandle> {
-    super::session::start(
-        initial,
-        crate::config::clamp_overlay_width_m(width_m),
-        egui_ctx,
-    )
+pub fn start(initial: OverlaySnapshot, width_m: f32) -> Option<OverlayHandle> {
+    super::session::start(initial, crate::config::clamp_overlay_width_m(width_m))
 }
 
 #[cfg(not(windows))]
-pub fn start(
-    _initial: OverlaySnapshot,
-    _width_m: f32,
-    _egui_ctx: egui::Context,
-) -> Option<OverlayHandle> {
+pub fn start(_initial: OverlaySnapshot, _width_m: f32) -> Option<OverlayHandle> {
     None
 }
 
@@ -282,7 +270,7 @@ mod tests {
     fn test_start_is_none_off_windows() {
         let snapshot =
             OverlaySnapshot::from_config(&Config::default(), false, "", "", &Default::default());
-        assert!(start(snapshot, 2.4, egui::Context::default()).is_none());
+        assert!(start(snapshot, 2.4).is_none());
     }
 
     fn all_false_snapshot() -> OverlaySnapshot {
@@ -333,24 +321,24 @@ mod tests {
     fn test_overlay_fields_labels_order_and_indent() {
         let fields = overlay_fields(&all_false_snapshot());
         let expected: Vec<(&str, bool, OverlayAction)> = vec![
-            ("Copy to clipboard", false, OverlayAction::ToggleClipboard),
             (
-                "Input to active window",
+                "クリップボードにコピー",
+                false,
+                OverlayAction::ToggleClipboard,
+            ),
+            (
+                "アクティブなウィンドウに入力",
                 false,
                 OverlayAction::ToggleAutoInput,
             ),
             (
-                "Send Enter after input",
+                "入力後に Enter を送る",
                 true,
                 OverlayAction::ToggleAutoInputSendEnter,
             ),
-            ("Input to VRChat", false, OverlayAction::ToggleVrchat),
-            ("校正 (Grok)", false, OverlayAction::ToggleProofread),
-            (
-                "エコー（そのまま）",
-                false,
-                OverlayAction::SetMode(Mode::Echo),
-            ),
+            ("VRChat に入力", false, OverlayAction::ToggleVrchat),
+            ("校正", false, OverlayAction::ToggleProofread),
+            ("エコー", false, OverlayAction::SetMode(Mode::Echo)),
             ("翻訳", false, OverlayAction::SetMode(Mode::Translate)),
             ("質問 (AI)", false, OverlayAction::SetMode(Mode::Question)),
         ];

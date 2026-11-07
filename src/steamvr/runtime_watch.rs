@@ -3,8 +3,8 @@
 //! このアプリが SteamVR を起動してしまわないよう、`VR_Init` は vrserver.exe が動いているときだけ
 //! 呼ぶ(SteamVR が動いていないときに Overlay として `VR_Init` すると、SteamVR が起動してしまう)。
 //! 動いていなければ数秒おきに見に行き、SteamVR が来たらつなぐ。
-//! つないだあとに SteamVR が終わったら(終了の知らせ、または vrserver.exe が居なくなったら)、
-//! アプリごと終了する。
+//! つないだあとに SteamVR が終わっても(終了の知らせ、または vrserver.exe が居なくなっても)、
+//! PC 側は終了せず切断して待機に戻る。SteamVR が起動したら自動でつなぎ直す。
 //! 判定の部分は描画先に依存しないので全OSでテストできる。
 
 use std::time::{Duration, Instant};
@@ -51,9 +51,10 @@ impl SessionEnd {
     pub fn after(&self) -> AfterSession {
         match self {
             SessionEnd::AppClosed => AfterSession::ThreadDone,
-            SessionEnd::SteamVrQuit | SessionEnd::SteamVrGone | SessionEnd::AnotherInstance => {
-                AfterSession::ExitApp
-            }
+            // SteamVR が終わった/居なくなっただけなら切断して待機に戻る
+            // (PC 側は単体で使えるツールなので終了しない)
+            SessionEnd::SteamVrQuit | SessionEnd::SteamVrGone => AfterSession::Retry,
+            SessionEnd::AnotherInstance => AfterSession::ExitApp,
             SessionEnd::Failed(_) => AfterSession::Retry,
         }
     }
@@ -65,9 +66,9 @@ impl SessionEnd {
                 "このアプリの別のコピーがもう SteamVR につないでいるので、こちらは終了する"
                     .to_string()
             }
-            SessionEnd::SteamVrQuit => "SteamVR が終了したので、アプリも終了する".to_string(),
+            SessionEnd::SteamVrQuit => "SteamVR が終了した。起動したらまた自動でつなぐ".to_string(),
             SessionEnd::SteamVrGone => {
-                "SteamVR(vrserver.exe)が居なくなったので、アプリも終了する".to_string()
+                "SteamVR(vrserver.exe)が居なくなった。起動したらまた自動でつなぐ".to_string()
             }
             SessionEnd::Failed(e) => format!(
                 "準備に失敗したので切断した({}秒後にやり直す): {}",
@@ -212,8 +213,8 @@ mod tests {
 
     #[test]
     fn session_end_messages_say_what_happens_next() {
-        assert!(SessionEnd::SteamVrQuit.message().contains("終了する"));
-        assert!(SessionEnd::SteamVrGone.message().contains("終了する"));
+        assert!(SessionEnd::SteamVrQuit.message().contains("つなぐ"));
+        assert!(SessionEnd::SteamVrGone.message().contains("つなぐ"));
         assert!(SessionEnd::AnotherInstance.message().contains("終了する"));
         assert!(
             SessionEnd::Failed("x".into())
@@ -225,8 +226,8 @@ mod tests {
     #[test]
     fn steamvr_ending_exits_the_app_but_setup_failure_retries() {
         // SteamVR が終わったら(知らせあり・なし)アプリも終了。重複したコピーも終了
-        assert_eq!(SessionEnd::SteamVrQuit.after(), AfterSession::ExitApp);
-        assert_eq!(SessionEnd::SteamVrGone.after(), AfterSession::ExitApp);
+        assert_eq!(SessionEnd::SteamVrQuit.after(), AfterSession::Retry);
+        assert_eq!(SessionEnd::SteamVrGone.after(), AfterSession::Retry);
         assert_eq!(SessionEnd::AnotherInstance.after(), AfterSession::ExitApp);
         // SteamVR は動いたままの準備失敗はつなぎ直す
         assert_eq!(SessionEnd::Failed("x".into()).after(), AfterSession::Retry);

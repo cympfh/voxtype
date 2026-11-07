@@ -15,18 +15,6 @@ pub enum Mode {
     Question,
 }
 
-impl Mode {
-    pub const ALL: [Mode; 3] = [Mode::Echo, Mode::Translate, Mode::Question];
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Mode::Echo => "エコー（そのまま）",
-            Mode::Translate => "翻訳",
-            Mode::Question => "質問 (AI)",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -52,10 +40,12 @@ pub struct Config {
     /// 加工モード(エコー/翻訳/質問)
     #[serde(default)]
     pub mode: Mode,
-    #[serde(default = "default_translate_lang_preset")]
-    pub translate_lang_preset: String,
-    #[serde(default = "default_translate_lang_custom")]
-    pub translate_lang_custom: String,
+    /// 翻訳先言語の候補。先頭が初期選択。設定画面で `/` 区切りで編集する
+    #[serde(default = "default_translate_langs")]
+    pub translate_langs: Vec<String>,
+    /// 翻訳先言語の現在の選択。translate_langs のどれか
+    #[serde(default = "default_translate_lang_selected")]
+    pub translate_lang_selected: String,
     /// 翻訳モードの出力テンプレート。`{source}` `{translated}` が使える
     #[serde(default = "default_translate_format")]
     pub translate_format: String,
@@ -65,6 +55,9 @@ pub struct Config {
     /// SteamVR オーバーレイの表示幅(メートル)。起動時に読む
     #[serde(default = "default_steamvr_overlay_width_m")]
     pub steamvr_overlay_width_m: f32,
+    /// 録音開始/停止のグローバルショートカットキー。空なら無効
+    #[serde(default = "default_shortcut_key")]
+    pub shortcut_key: String,
     /// VR パネル右端の A/B/X/Y ボタン(アバターパラメーター)
     #[serde(default = "crate::avatar_buttons::default_buttons")]
     pub avatar_buttons: [crate::avatar_buttons::AvatarButton; 4],
@@ -94,12 +87,16 @@ fn default_vrchat_enabled() -> bool {
     false
 }
 
-fn default_translate_lang_preset() -> String {
-    "EN".to_string()
+fn default_translate_langs() -> Vec<String> {
+    vec!["ZH".to_string(), "EN".to_string()]
 }
 
-fn default_translate_lang_custom() -> String {
-    String::new()
+fn default_translate_lang_selected() -> String {
+    "ZH".to_string()
+}
+
+fn default_shortcut_key() -> String {
+    "F9".to_string()
 }
 
 fn default_translate_format() -> String {
@@ -139,11 +136,12 @@ impl Default for Config {
             vrchat_enabled: default_vrchat_enabled(),
             proofread_enabled: false,
             mode: Mode::default(),
-            translate_lang_preset: default_translate_lang_preset(),
-            translate_lang_custom: default_translate_lang_custom(),
+            translate_langs: default_translate_langs(),
+            translate_lang_selected: default_translate_lang_selected(),
             translate_format: default_translate_format(),
             question_format: default_question_format(),
             steamvr_overlay_width_m: default_steamvr_overlay_width_m(),
+            shortcut_key: default_shortcut_key(),
             avatar_buttons: crate::avatar_buttons::default_buttons(),
         }
     }
@@ -196,6 +194,28 @@ impl Config {
             if old_translate && !obj.contains_key("mode") {
                 obj.insert("mode".to_string(), serde_json::json!("translate"));
             }
+            // 0.8.0 未満の翻訳先言語 (preset: EN/CN/CUSTOM + custom) を
+            // 候補リスト + 選択値に移す
+            if !obj.contains_key("translate_lang_selected")
+                && let Some(preset) = obj.get("translate_lang_preset").and_then(|v| v.as_str())
+            {
+                let selected = match preset {
+                    "CN" => "ZH".to_string(),
+                    "EN" => "EN".to_string(),
+                    _ => obj
+                        .get("translate_lang_custom")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("ZH")
+                        .to_string(),
+                };
+                obj.insert(
+                    "translate_lang_selected".to_string(),
+                    serde_json::json!(selected),
+                );
+            }
+            obj.remove("translate_lang_preset");
+            obj.remove("translate_lang_custom");
+
             obj.remove("auto_translate_enabled");
             obj.remove("eliza_enabled");
             obj.remove("eliza_response_to_vrchat_enabled");
@@ -223,13 +243,42 @@ impl Config {
         self.auto_input_enabled = false;
     }
 
-    /// 翻訳先言語の表示名を preset/custom から解決する
+    /// 翻訳先言語。選択中の値(候補に無ければ先頭)を Grok に渡す表示名に解決する
     pub fn translate_target_lang(&self) -> String {
-        match self.translate_lang_preset.as_str() {
-            "EN" => "英語".to_string(),
-            "CN" => "中国語".to_string(),
-            _ => self.translate_lang_custom.clone(),
-        }
+        let selected = if self.translate_langs.contains(&self.translate_lang_selected) {
+            self.translate_lang_selected.clone()
+        } else {
+            self.translate_langs
+                .first()
+                .cloned()
+                .unwrap_or_else(default_translate_lang_selected)
+        };
+        lang_display_name(&selected)
+    }
+}
+
+/// 言語コードは日本語名に、それ以外(自由記述)はそのまま Grok に渡す
+pub fn lang_display_name(code: &str) -> String {
+    match code {
+        "ZH" => "中国語".to_string(),
+        "EN" => "英語".to_string(),
+        "JA" => "日本語".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 設定画面の `/` 区切りテキストから候補リストを作る。空・空白だけなら既定
+pub fn parse_translate_langs(text: &str) -> Vec<String> {
+    let mut langs: Vec<String> = text
+        .split('/')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    langs.dedup();
+    if langs.is_empty() {
+        default_translate_langs()
+    } else {
+        langs
     }
 }
 
@@ -313,14 +362,33 @@ mod tests {
     #[test]
     fn test_translate_target_lang_presets() {
         let mut config = Config::default();
-        assert_eq!(config.translate_target_lang(), "英語");
-
-        config.translate_lang_preset = "CN".to_string();
+        // 既定は ZH/EN で先頭の ZH が選ばれる
+        assert_eq!(config.translate_langs, vec!["ZH", "EN"]);
         assert_eq!(config.translate_target_lang(), "中国語");
 
-        config.translate_lang_preset = "CUSTOM".to_string();
-        config.translate_lang_custom = "フランス語".to_string();
+        config.translate_lang_selected = "EN".to_string();
+        assert_eq!(config.translate_target_lang(), "英語");
+
+        // 自由記述の言語はそのまま Grok に渡す
+        config.translate_langs = vec!["ZH".to_string(), "フランス語".to_string()];
+        config.translate_lang_selected = "フランス語".to_string();
         assert_eq!(config.translate_target_lang(), "フランス語");
+
+        // 選択が候補に無ければ先頭にフォールバック
+        config.translate_lang_selected = "JA".to_string();
+        assert_eq!(config.translate_target_lang(), "中国語");
+    }
+
+    #[test]
+    fn test_parse_translate_langs() {
+        assert_eq!(parse_translate_langs("ZH/EN"), vec!["ZH", "EN"]);
+        assert_eq!(
+            parse_translate_langs(" ZH / EN / 韓国語 "),
+            vec!["ZH", "EN", "韓国語"]
+        );
+        assert_eq!(parse_translate_langs(""), vec!["ZH", "EN"]);
+        assert_eq!(parse_translate_langs(" / / "), vec!["ZH", "EN"]);
+        assert_eq!(parse_translate_langs("ZH/ZH"), vec!["ZH"]);
     }
 
     #[test]
@@ -329,7 +397,14 @@ mod tests {
         let json = r#"{"auto_translate_enabled": true, "translate_lang_preset": "CN"}"#;
         let config = Config::migrate_and_parse(json).unwrap();
         assert_eq!(config.mode, Mode::Translate);
-        assert_eq!(config.translate_lang_preset, "CN");
+        // 旧 CN は ZH に引き継ぐ
+        assert_eq!(config.translate_lang_selected, "ZH");
+        assert_eq!(config.translate_target_lang(), "中国語");
+
+        // 自由記述 (CUSTOM) だった場合はその文言を引き継ぐ
+        let json = r#"{"translate_lang_preset": "CUSTOM", "translate_lang_custom": "フランス語"}"#;
+        let config = Config::migrate_and_parse(json).unwrap();
+        assert_eq!(config.translate_lang_selected, "フランス語");
 
         // OFF だった・キーが無い場合はエコー
         let config = Config::migrate_and_parse(r#"{"auto_translate_enabled": false}"#).unwrap();
