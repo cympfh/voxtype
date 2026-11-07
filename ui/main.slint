@@ -479,13 +479,13 @@ export component MainWindow inherits Window {
                     min-height: 64px;
                 }
 
-                Text { text: "翻訳の先行送信フォーマット (結果を待つ間にVRChatへ先に送る、{source} が使えます):"; }
+                Text { text: "翻訳中フォーマット ({source} が使えます):"; }
                 TextEdit {
                     text <=> root.translate-pending-format;
                     min-height: 40px;
                 }
 
-                Text { text: "質問の先行送信フォーマット (結果を待つ間にVRChatへ先に送る、{source} が使えます):"; }
+                Text { text: "質問中フォーマット ({source} が使えます):"; }
                 TextEdit {
                     text <=> root.question-pending-format;
                     min-height: 40px;
