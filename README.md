@@ -39,6 +39,12 @@
 2. 送り先 (クリップボード / 自動入力 / VRChat) とモード (エコー / 翻訳 / 質問) を選ぶ
 3. 「📝 QvPen を呼ぶ」で QvPen を呼び出せます
 
+処理の流れ:
+
+<p align="center">
+  <img src="assets/pipeline.svg" width="670" alt="処理の流れ: マイク → 音声認識 → 校正 → エコー/翻訳/質問 → クリップボード/自動入力/VRChat">
+</p>
+
 ## SteamVR オーバーレイ
 
 SteamVR のダッシュボードに「VRC Companion」のタブが出て、録音の開始・停止、送り先・モードの切り替え、QvPen の呼び出しが VR の中からできます。
