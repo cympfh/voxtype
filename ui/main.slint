@@ -226,6 +226,9 @@ export component MainWindow inherits Window {
     in-out property <float> silence-threshold: 0.03;
     in-out property <string> translate-format: "";
     in-out property <string> question-format: "";
+    // 翻訳・質問の結果を待つ間に VRChat へ先行送信するテンプレート
+    in-out property <string> translate-pending-format: "";
+    in-out property <string> question-pending-format: "";
     // 翻訳先言語の候補リスト(設定ページの編集用、`/` 区切りテキスト)
     in-out property <string> translate-langs-text: "";
     // 録音開始/停止のグローバルショートカットキー(空で無効)
@@ -473,6 +476,18 @@ export component MainWindow inherits Window {
                 TextEdit {
                     text <=> root.question-format;
                     min-height: 64px;
+                }
+
+                Text { text: "翻訳の先行送信フォーマット (結果を待つ間にVRChatへ先に送る、{source} が使えます):"; }
+                TextEdit {
+                    text <=> root.translate-pending-format;
+                    min-height: 40px;
+                }
+
+                Text { text: "質問の先行送信フォーマット (結果を待つ間にVRChatへ先に送る、{source} が使えます):"; }
+                TextEdit {
+                    text <=> root.question-pending-format;
+                    min-height: 40px;
                 }
 
                 Button {

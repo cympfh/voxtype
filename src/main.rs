@@ -598,6 +598,21 @@ impl App {
             let translate_format = self.config.translate_format.clone();
             let question_format = self.config.question_format.clone();
             let raw = text;
+            // 翻訳・質問モードでは結果を待たず、まずソースを VRChat へ送る。
+            // 結果が来たらフォーマット済みの文でもう一度送り直す(chatbox は上書き表示)
+            if self.config.vrchat_enabled && mode != Mode::Echo {
+                let pending_format = match mode {
+                    Mode::Translate => &self.config.translate_pending_format,
+                    _ => &self.config.question_pending_format,
+                };
+                let pending = grok::render_template(pending_format, &raw, "", "");
+                if !pending.is_empty() {
+                    let client = vrchat::VRChatClient::new();
+                    if let Err(e) = client.send_message(&pending) {
+                        crate::log!("VRChat OSC error (pending): {}", e);
+                    }
+                }
+            }
             let (tx, rx) = channel::<Result<String, String>>();
             std::thread::spawn(move || {
                 let result = (|| {
@@ -1040,6 +1055,8 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
             window.set_silence_threshold(app.config.silence_threshold);
             window.set_translate_format(app.config.translate_format.clone().into());
             window.set_question_format(app.config.question_format.clone().into());
+            window.set_translate_pending_format(app.config.translate_pending_format.clone().into());
+            window.set_question_pending_format(app.config.question_pending_format.clone().into());
             window.set_translate_langs_text(app.config.translate_langs.join("/").into());
             window.set_shortcut_key(app.config.shortcut_key.clone().into());
             window.set_show_settings(true);
@@ -1063,6 +1080,8 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
             app.config.silence_threshold = window.get_silence_threshold();
             app.config.translate_format = window.get_translate_format().to_string();
             app.config.question_format = window.get_question_format().to_string();
+            app.config.translate_pending_format = window.get_translate_pending_format().to_string();
+            app.config.question_pending_format = window.get_question_pending_format().to_string();
             app.config.translate_langs =
                 crate::config::parse_translate_langs(&window.get_translate_langs_text());
             if !app
