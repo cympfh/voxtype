@@ -1,4 +1,4 @@
-//! 自前のログファイル %APPDATA%\vrc-companion\vrc-companion.log。
+//! 自前のログファイル %APPDATA%\voxtype\voxtype.log。
 //! どう起動されても(ダブルクリック・SteamVR の自動起動・WSL)stderr が見えないので、
 //! `log!` で出したものは時刻付きでこのファイルにも書く。前回の分は .log.1 に 1 世代だけ残し、
 //! 1 回の起動で MAX_BYTES を超えたらそこでも回す。秘密(API キーなど)はここに渡さないこと。
@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-const FILE_NAME: &str = "vrc-companion.log";
+const FILE_NAME: &str = "voxtype.log";
 const MAX_BYTES: u64 = 1024 * 1024;
 
 struct LogFile {
@@ -21,7 +21,7 @@ static LOG: Mutex<Option<LogFile>> = Mutex::new(None);
 
 /// 起動時に 1 回呼ぶ。失敗してもアプリは動かす(stderr にだけ出る)
 pub fn init() {
-    let Some(dir) = dirs::config_dir().map(|d| d.join("vrc-companion")) else {
+    let Ok(dir) = crate::config::app_config_dir() else {
         return;
     };
     match open_in(&dir) {
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_open_in_keeps_previous_run_as_dot_1() {
-        let dir = std::env::temp_dir().join(format!("vrc-companion-log-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("voxtype-log-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut first = open_in(&dir).unwrap();
         first.file.write_all(b"run1\n").unwrap();
@@ -235,7 +235,7 @@ mod tests {
             "run2\n"
         );
         assert_eq!(
-            std::fs::read_to_string(dir.join("vrc-companion.log.1")).unwrap(),
+            std::fs::read_to_string(dir.join("voxtype.log.1")).unwrap(),
             "run1\n"
         );
         std::fs::remove_dir_all(&dir).ok();

@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 /// app_keyが一致していないとSteamVR側で同一アプリとして関連付けられない。
 pub const APP_KEY: &str = "cympfh.vrc_companion";
 const APP_NAME: &str = "VRC Companion";
-const MANIFEST_FILE_NAME: &str = "vrc-companion.vrmanifest";
+const MANIFEST_FILE_NAME: &str = "voxtype.vrmanifest";
+/// 0.10 までのマニフェスト名。SteamVR の旧登録を外すときに使う
+#[cfg_attr(not(windows), allow(dead_code))] // session.rs が Windows だけで参照する
+pub const LEGACY_MANIFEST_FILE_NAME: &str = "vrc-companion.vrmanifest";
 const ICON_FILE_NAME: &str = "vrc-companion-icon.png";
 /// ロゴ(assets/logo.png, 256x256)。SteamVR のアプリ一覧・ダッシュボードのタブのアイコンに使う
 pub const ICON_PNG: &[u8] = include_bytes!("../../assets/logo.png");
@@ -53,7 +56,7 @@ pub fn build_manifest_json(
     json.to_string()
 }
 
-/// アイコン PNG の置き場所(`dir` は %APPDATA%\vrc-companion)
+/// アイコン PNG の置き場所(`dir` は %APPDATA%\voxtype)
 pub fn icon_path_in(dir: &Path) -> PathBuf {
     dir.join(ICON_FILE_NAME)
 }
@@ -77,14 +80,12 @@ pub fn write_icon_in(dir: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// マニフェストを自身の config dir(%APPDATA%\vrc-companion)に書き込み、そのフルパスを返す。
+/// マニフェストを自身の config dir(%APPDATA%\voxtype)に書き込み、そのフルパスを返す。
 /// session.rs(Windows専用)からのみ呼ばれるため、non-Windows host build では dead_code になる。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn write_manifest(action_manifest_path: Option<&Path>) -> Result<PathBuf, String> {
     let exe_path = std::env::current_exe().map_err(|e| format!("current_exe取得失敗: {}", e))?;
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| "config dir取得失敗".to_string())?
-        .join("vrc-companion");
+    let config_dir = crate::config::app_config_dir()?;
     write_manifest_in(
         &config_dir,
         &exe_path.to_string_lossy(),
@@ -125,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_icon_path_and_rewrite_skipped_when_identical() {
-        let dir = std::env::temp_dir().join(format!("vrc-companion-icon-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("voxtype-icon-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = write_icon_in(&dir).unwrap();
         assert_eq!(path, dir.join("vrc-companion-icon.png"));
@@ -184,9 +185,10 @@ mod tests {
 
     #[test]
     fn test_write_manifest_writes_file_with_own_app_key() {
-        // 本物の %APPDATA%\vrc-companion\vrc-companion.vrmanifest には触らない
+        // 本物の %APPDATA%\voxtype\voxtype.vrmanifest には触らない
         // (以前は本物を書いて消していたので、Windows でテストを走らせると SteamVR の自動起動が外れた)
-        let dir = std::env::temp_dir().join(format!("vrc-companion-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("voxtype-manifest-test-{}", std::process::id()));
         let path = write_manifest_in(&dir, r"C:\path\to\app.exe", None).unwrap();
         assert!(path.starts_with(&dir));
         let content = std::fs::read_to_string(&path).unwrap();

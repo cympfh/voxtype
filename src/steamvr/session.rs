@@ -469,6 +469,30 @@ fn ensure_auto_launch_registered(lib: &OpenVrLibrary, action_manifest: Option<&s
         return;
     };
 
+    // 旧ディレクトリのマニフェストが残っていると、自動起動が古い exe を指したままになる。
+    // app_key は変えず、登録だけ新しいマニフェストに付け替える。
+    if let Some(old_dir) = crate::config::legacy_app_config_dir() {
+        let old_manifest = old_dir.join(manifest::LEGACY_MANIFEST_FILE_NAME);
+        if old_manifest.exists()
+            && let Ok(old_c) = CString::new(old_manifest.to_string_lossy().into_owned())
+        {
+            let err = unsafe {
+                (applications.remove_application_manifest)(old_c.as_ptr() as *mut c_char)
+            };
+            if err != 0 {
+                crate::log!(
+                    "[SteamVR] 旧マニフェストの登録解除: EVRApplicationError={} (既に無い場合は無視してよい)",
+                    err
+                );
+            } else {
+                crate::log!(
+                    "[SteamVR] 旧マニフェストの登録を外した: {}",
+                    old_manifest.display()
+                );
+            }
+        }
+    }
+
     let path = match manifest::write_manifest(action_manifest) {
         Ok(path) => path,
         Err(e) => {
@@ -826,7 +850,7 @@ fn create_dashboard_overlay(lib: &OpenVrLibrary) -> Result<VrOverlayHandle, Dash
 
 /// ダッシュボード下段のタブのアイコン(サムネイル)にロゴを出す。失敗してもタブは使えるので報告だけ
 fn set_thumbnail_icon(lib: &OpenVrLibrary, thumbnail_handle: VrOverlayHandle) {
-    let Some(dir) = dirs::config_dir().map(|d| d.join("vrc-companion")) else {
+    let Ok(dir) = crate::config::app_config_dir() else {
         return;
     };
     let path = match manifest::write_icon_in(&dir) {

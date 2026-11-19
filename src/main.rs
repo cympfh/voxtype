@@ -42,7 +42,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     applog::init();
     applog::install_panic_hook();
-    crate::log!("[App] vrc-companion {} 起動", env!("CARGO_PKG_VERSION"));
+    crate::log!("[App] voxtype {} 起動", env!("CARGO_PKG_VERSION"));
 
     // Windows 11 標準の見た目に寄せる(ウィンドウ生成より前に決める)
     // SAFETY: まだスレッドを立てていない main の先頭でのみ呼ぶ
