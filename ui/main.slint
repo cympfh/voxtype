@@ -234,6 +234,8 @@ export component MainWindow inherits Window {
     in-out property <string> question-pending-format: "";
     // 翻訳先言語の候補リスト(設定ページの編集用、`/` 区切りテキスト)
     in-out property <string> translate-langs-text: "";
+    // 翻訳用モデル。TranslateModel::ALL の並び (0=grok-4.20 1=grok-4.7 2=grok-4.5 3=grok-4.3)
+    in-out property <int> translate-model-index: 0;
     // 録音開始/停止のグローバルショートカットキー(空で無効)
     in-out property <string> shortcut-key: "";
     // 自動キャリブレーション
@@ -465,6 +467,12 @@ export component MainWindow inherits Window {
                 LineEdit {
                     text <=> root.translate-langs-text;
                     placeholder-text: "例: ZH/EN";
+                }
+
+                Text { text: "翻訳用モデル:"; }
+                ComboBox {
+                    model: ["grok-4.20", "grok-4.7", "grok-4.5", "grok-4.3"];
+                    current-index <=> root.translate-model-index;
                 }
 
                 Text { text: "翻訳フォーマット ({source} {translated} が使えます):"; }

@@ -688,6 +688,7 @@ impl App {
             let mode = self.config.mode;
             let proofread = self.config.proofread_enabled;
             let target_lang = self.config.translate_target_lang();
+            let translate_model = self.config.translate_model;
             let translate_format = self.config.translate_format.clone();
             let question_format = self.config.question_format.clone();
             let raw = text;
@@ -719,7 +720,8 @@ impl App {
                             } else {
                                 raw
                             };
-                            let translated = client.translate(&target_lang, &source)?;
+                            let translated =
+                                client.translate(translate_model, &target_lang, &source)?;
                             Ok(grok::render_template(
                                 &translate_format,
                                 &source,
@@ -1151,6 +1153,7 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
             window.set_translate_pending_format(app.config.translate_pending_format.clone().into());
             window.set_question_pending_format(app.config.question_pending_format.clone().into());
             window.set_translate_langs_text(app.config.translate_langs.join("/").into());
+            window.set_translate_model_index(app.config.translate_model.index() as i32);
             window.set_shortcut_key(app.config.shortcut_key.clone().into());
             window.set_show_settings(true);
         });
@@ -1184,6 +1187,8 @@ fn wire_callbacks(window: &MainWindow, app: &Rc<RefCell<App>>) {
             {
                 app.config.translate_lang_selected = app.config.translate_langs[0].clone();
             }
+            app.config.translate_model =
+                crate::config::TranslateModel::from_index(window.get_translate_model_index());
             app.config.shortcut_key = window.get_shortcut_key().trim().to_string();
             app.register_shortcut();
             if let Err(e) = app.config.save() {
