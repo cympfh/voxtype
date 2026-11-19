@@ -28,7 +28,7 @@ SteamVR overlay / OpenVR FFI / WGL code is `#[cfg(windows)]`. Host `cargo test` 
 
 ## Architecture
 
-Single-window **Slint** app (fluent style; UI declared in `ui/main.slint`, compiled by `build.rs`). All mutable state lives in the `App` struct in `src/main.rs`; UI events are Slint callbacks mutating `App`, and a repeating `slint::Timer` (50 ms) calls `App::tick()` which drains channels, auto-stops on silence, and pushes state back into window properties. Cross-thread communication is channel-based:
+Single-window **Slint** app (fluent style; UI declared in `ui/main.slint`, compiled by `build.rs`) plus a `SystemTrayIcon` (`VoxtypeTray` in the same file). All mutable state lives in the `App` struct in `src/main.rs`; UI events are Slint callbacks mutating `App`, and a repeating `slint::Timer` (50 ms) calls `App::tick()` which drains channels, auto-stops on silence, hides the window to the tray when it is minimized, and pushes state back into window properties. The 50 ms tick, the global shortcut, and the SteamVR overlay thread keep running while the window is hidden. Closing the window (or the tray menu's 終了) still quits the app. Tray show/hide/quit decisions live in `src/tray.rs` so they can be unit-tested. Cross-thread communication is channel-based:
 
 - `transcription_receiver` (`tokio::mpsc`): partial/success/error events streamed from the STT websocket task, running on its own `tokio::runtime::Runtime` spawned per recording session (`App::start_streaming_transcription`) and shut down (`rt.shutdown_background()`) once transcription completes or errors.
 - `process_receiver` (`std::sync::mpsc`): Grok HTTP call (correct/translate/question, `integrations::grok::GrokClient`, blocking `reqwest`) runs on a plain spawned thread, result polled by `tick()`.
@@ -94,7 +94,8 @@ The overlay renderer has its **own** `egui::Context` and must load `fonts/NotoSa
   - `input_manifest.rs` — all OS: SteamVR Input action manifest + default bindings (host-testable)
   - `runtime_watch.rs` — all OS: is SteamVR (vrserver.exe) running, session-end reasons, log de-dup (host-testable)
   - `toast_ui.rs` — all OS: recording start/stop toast drawing + fade curve (host-testable)
-- `ui/main.slint` — the desktop UI (main page, settings page, avatar-button window), compiled by `build.rs`
+- `ui/main.slint` — the desktop UI (main page, settings page, avatar-button window) and `VoxtypeTray` (system tray icon), compiled by `build.rs`
+- `src/tray.rs` — desktop window vs tray state machine (host-testable)
 - `src/config.rs`, `src/main.rs` — stay at the root
 
 `auto_input::call_qvpen` and the Windows-`FindWindowW`/`SetForegroundWindow` calls in `integrations/auto_input.rs` are `#[cfg(windows)]`-gated; the non-Windows path just returns an error, since this only matters on the deployed target.
