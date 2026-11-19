@@ -182,7 +182,7 @@ mod tests {
         assert!(!is_steamvr_server("vrmonitor.exe"));
         assert!(!is_steamvr_server("vrstartup.exe"));
         assert!(!is_steamvr_server("vrserver.exe.bak"));
-        assert!(!is_steamvr_server("vrc-companion.exe"));
+        assert!(!is_steamvr_server("voxtype.exe"));
     }
 
     #[test]

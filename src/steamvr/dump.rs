@@ -1,4 +1,4 @@
-//! `vrc-companion.exe --dump-overlay <出力先の接頭辞>`: SteamVR なしで、オーバーレイの見た目を
+//! `voxtype.exe --dump-overlay <出力先の接頭辞>`: SteamVR なしで、オーバーレイの見た目を
 //! 本物の描画経路(WGL + egui_glow)で BMP に書き出す。見た目の確認・README 用。
 //! サンプルの文字列は合成データ。
 

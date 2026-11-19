@@ -238,7 +238,7 @@ const OVERLAY_FN_TABLE_FIELD_COUNT: usize = 82;
 #[repr(C)]
 pub struct VrIvApplicationsFnTable {
     pub add_application_manifest: unsafe extern "C" fn(*mut c_char, bool) -> EVRApplicationError,
-    pub remove_application_manifest: PlaceholderFn,
+    pub remove_application_manifest: unsafe extern "C" fn(*mut c_char) -> EVRApplicationError,
     pub is_application_installed: unsafe extern "C" fn(*mut c_char) -> bool,
     pub get_application_count: PlaceholderFn,
     pub get_application_key_by_index: PlaceholderFn,

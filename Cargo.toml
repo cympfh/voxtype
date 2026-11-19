@@ -1,6 +1,6 @@
 [package]
-name = "vrc-companion"
-version = "0.10.0"
+name = "voxtype"
+version = "0.11.0"
 edition = "2024"
 
 [dependencies]

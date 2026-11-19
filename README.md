@@ -31,7 +31,7 @@
 1. アプリを起動して右上の「⚙ 設定」を開く
 2. xAI API キーを入力して保存する
 
-設定は `%APPDATA%\vrc-companion\config.json` (Windows) に保存されます。
+設定は `%APPDATA%\voxtype\config.json` (Windows) に保存されます。以前の `%APPDATA%\vrc-companion\config.json` は、新しい場所にファイルが無い初回だけコピーします(元のファイルは残します)。
 
 ## 使い方
 

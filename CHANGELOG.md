@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-19
+
+### Changed
+
+- Windows 側の名前を `voxtype` にそろえた。exe は `voxtype.exe`、設定とログは `%APPDATA%\voxtype` (`config.json` / `voxtype.log`)、`make install` の先は `~/apps/voxtype`。SteamVR オーバーレイの表示名 (VRC Companion) とアプリキー (`cympfh.vrc_companion`) はそのまま
+- 新しい設定ディレクトリに `config.json` が無いときは、以前の `%APPDATA%\vrc-companion\config.json` をコピーする(元のファイルは消さない)。SteamVR の自動起動は、同じアプリキーのまま新しい exe を指すマニフェストに付け替える
+- エージェント向けドキュメントを `CLAUDE.md` から `AGENTS.md` に移し、命名規則を追記した
+
 ## [0.10.0] - 2026-11-19
 
 ### Added

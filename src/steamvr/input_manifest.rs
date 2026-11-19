@@ -190,13 +190,10 @@ pub fn write_input_files(dir: &Path) -> Result<PathBuf, String> {
     Ok(manifest_path)
 }
 
-/// %APPDATA%\vrc-companion\steamvr_input
+/// %APPDATA%\voxtype\steamvr_input
 #[allow(dead_code)]
 pub fn default_input_dir() -> Result<PathBuf, String> {
-    Ok(dirs::config_dir()
-        .ok_or_else(|| "config dir取得失敗".to_string())?
-        .join("vrc-companion")
-        .join("steamvr_input"))
+    Ok(crate::config::app_config_dir()?.join("steamvr_input"))
 }
 
 #[cfg(test)]
@@ -276,8 +273,7 @@ mod tests {
 
     #[test]
     fn test_write_input_files_writes_manifest_and_bindings() {
-        let dir =
-            std::env::temp_dir().join(format!("vrc-companion-input-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("voxtype-input-test-{}", std::process::id()));
         let manifest = write_input_files(&dir).unwrap();
         assert_eq!(manifest, dir.join(ACTION_MANIFEST_FILE_NAME));
         assert!(manifest.is_file());

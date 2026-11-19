@@ -1,6 +1,37 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// PC / Windows 側のアプリ名。設定ディレクトリと exe の名前に使う。
+/// SteamVR 側の表示名は VRC Companion のまま(issue #12)。
+pub const APP_DIR_NAME: &str = "voxtype";
+/// 0.10 までの設定ディレクトリ名。config.json のコピー元
+pub const LEGACY_APP_DIR_NAME: &str = "vrc-companion";
+
+/// `%APPDATA%\voxtype` (Windows) / `~/.config/voxtype` (Linux)
+pub fn app_config_dir() -> Result<PathBuf, String> {
+    Ok(dirs::config_dir()
+        .ok_or("Failed to get config directory")?
+        .join(APP_DIR_NAME))
+}
+
+/// 0.10 までの設定ディレクトリ。無ければ None
+pub fn legacy_app_config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join(LEGACY_APP_DIR_NAME))
+}
+
+/// 新しい場所に config.json が無く、古い場所にあればコピーする。元のファイルは消さない。
+/// コピーしたら true。
+pub fn copy_legacy_config_if_needed(new_dir: &Path, old_dir: &Path) -> Result<bool, String> {
+    let new_path = new_dir.join("config.json");
+    let old_path = old_dir.join("config.json");
+    if new_path.exists() || !old_path.exists() {
+        return Ok(false);
+    }
+    fs::create_dir_all(new_dir).map_err(|e| format!("Failed to create config directory: {}", e))?;
+    fs::copy(&old_path, &new_path).map_err(|e| format!("Failed to copy legacy config: {}", e))?;
+    Ok(true)
+}
 
 /// 認識結果の加工モード(排他)。パイプラインの【モード選択】に対応する
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -161,8 +192,18 @@ impl Default for Config {
 
 impl Config {
     pub fn config_path() -> Result<PathBuf, String> {
-        let config_dir = dirs::config_dir().ok_or("Failed to get config directory")?;
-        let app_config_dir = config_dir.join("vrc-companion");
+        let app_config_dir = app_config_dir()?;
+        if let Some(old) = legacy_app_config_dir() {
+            match copy_legacy_config_if_needed(&app_config_dir, &old) {
+                Ok(true) => crate::log!(
+                    "[App] 設定を {} から {} へコピーした(元のファイルは残してある)",
+                    old.join("config.json").display(),
+                    app_config_dir.join("config.json").display()
+                ),
+                Ok(false) => {}
+                Err(e) => crate::log!("[App] 旧設定のコピーに失敗: {}", e),
+            }
+        }
 
         if !app_config_dir.exists() {
             fs::create_dir_all(&app_config_dir)
@@ -450,5 +491,58 @@ mod tests {
         assert!(!config.vrchat_enabled);
         let saved = serde_json::to_string(&config).unwrap();
         assert!(!saved.contains("vrchat_osc_mute_trigger_enabled"));
+    }
+
+    #[test]
+    fn test_copy_legacy_config_when_new_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "voxtype-cfg-migrate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let old_dir = root.join("vrc-companion");
+        let new_dir = root.join("voxtype");
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("config.json"), r#"{"mode":"translate"}"#).unwrap();
+
+        assert!(copy_legacy_config_if_needed(&new_dir, &old_dir).unwrap());
+        assert_eq!(
+            fs::read_to_string(new_dir.join("config.json")).unwrap(),
+            r#"{"mode":"translate"}"#
+        );
+        // 元は残る
+        assert!(old_dir.join("config.json").exists());
+
+        // 既に新しいファイルがあるときは上書きしない
+        fs::write(new_dir.join("config.json"), r#"{"mode":"echo"}"#).unwrap();
+        fs::write(old_dir.join("config.json"), r#"{"mode":"question"}"#).unwrap();
+        assert!(!copy_legacy_config_if_needed(&new_dir, &old_dir).unwrap());
+        assert_eq!(
+            fs::read_to_string(new_dir.join("config.json")).unwrap(),
+            r#"{"mode":"echo"}"#
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_copy_legacy_config_skips_when_old_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "voxtype-cfg-nolegacy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let old_dir = root.join("vrc-companion");
+        let new_dir = root.join("voxtype");
+        fs::create_dir_all(&old_dir).unwrap();
+        assert!(!copy_legacy_config_if_needed(&new_dir, &old_dir).unwrap());
+        assert!(!new_dir.join("config.json").exists());
+        fs::remove_dir_all(&root).ok();
     }
 }
