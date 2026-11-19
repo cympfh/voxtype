@@ -520,3 +520,28 @@ export component MainWindow inherits Window {
         }
     }
 }
+
+// タスクトレイ。最小化で窓を隠したあとの復帰先。起動中はずっと出しておく。
+export component VoxtypeTray inherits SystemTrayIcon {
+    icon: @image-url("../assets/voxtype.png");
+    tooltip: "voxtype";
+    title: "voxtype";
+
+    callback show-window();
+    callback exit-app();
+
+    clicked => {
+        root.show-window();
+    }
+
+    Menu {
+        MenuItem {
+            title: "表示";
+            activated => { root.show-window(); }
+        }
+        MenuItem {
+            title: "終了";
+            activated => { root.exit-app(); }
+        }
+    }
+}

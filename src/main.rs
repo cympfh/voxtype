@@ -6,6 +6,7 @@ mod avatar_buttons;
 mod config;
 mod integrations;
 mod steamvr;
+mod tray;
 
 slint::include_modules!();
 
@@ -87,6 +88,51 @@ fn main() -> Result<(), slint::PlatformError> {
         );
     }
 
+    let tray = VoxtypeTray::new()?;
+    {
+        let mut app = app.borrow_mut();
+        app.tray = Some(tray.as_weak());
+    }
+    {
+        let window_weak = window.as_weak();
+        let app = app.clone();
+        tray.on_show_window(move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            app.borrow_mut()
+                .apply_desktop(tray::DesktopEvent::RestoreRequested, &window);
+        });
+    }
+    {
+        let window_weak = window.as_weak();
+        let app = app.clone();
+        tray.on_exit_app(move || {
+            if let Some(window) = window_weak.upgrade() {
+                app.borrow_mut()
+                    .apply_desktop(tray::DesktopEvent::CloseRequested, &window);
+            } else {
+                app.borrow().hide_tray_and_quit();
+            }
+        });
+    }
+    {
+        let app = app.clone();
+        let window_for_close = window.as_weak();
+        window.window().on_close_requested(move || {
+            if let Some(window) = window_for_close.upgrade() {
+                app.borrow_mut()
+                    .apply_desktop(tray::DesktopEvent::CloseRequested, &window);
+            } else {
+                let _ = slint::quit_event_loop();
+            }
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
+    if let Err(e) = tray.show() {
+        crate::log!("トレイアイコンを出せない: {}", e);
+    }
+
     window.run()
 }
 
@@ -157,6 +203,11 @@ struct App {
 
     /// 実行中の自動キャリブレーション
     calibration: Option<Calibration>,
+
+    /// デスクトップ窓がタスクバー上かトレイに入っているか
+    desktop: tray::DesktopState,
+    /// タスクトレイのアイコン。終了時に隠すために持つ
+    tray: Option<slint::Weak<VoxtypeTray>>,
 }
 
 impl App {
@@ -198,6 +249,8 @@ impl App {
             hotkey_manager: None,
             registered_hotkey: None,
             calibration: None,
+            desktop: tray::DesktopState::Shown,
+            tray: None,
         };
         app.register_shortcut();
         app
@@ -394,6 +447,11 @@ impl App {
 
         self.tick_calibration(window);
 
+        // 最小化されたらタスクバーから消してトレイへ
+        if window.window().is_minimized() {
+            self.apply_desktop(tray::DesktopEvent::Minimized, window);
+        }
+
         if let Some(overlay) = &self.steamvr_overlay
             && overlay.exit_requested()
         {
@@ -536,6 +594,41 @@ impl App {
         use std::io::Write;
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
+        self.hide_tray_and_quit();
+    }
+
+    /// トレイの「表示」・最小化・閉じる/終了を、状態機械を通して窓へ反映する
+    fn apply_desktop(&mut self, event: tray::DesktopEvent, window: &MainWindow) {
+        let (next, action) = tray::handle_desktop(self.desktop, event);
+        match action {
+            tray::DesktopAction::None => {
+                self.desktop = next;
+            }
+            tray::DesktopAction::HideToTray => match window.hide() {
+                Ok(()) => {
+                    self.desktop = next;
+                    crate::log!("[App] ウィンドウをトレイにしまった");
+                }
+                Err(e) => crate::log!("トレイへの退避に失敗: {}", e),
+            },
+            tray::DesktopAction::RestoreWindow => {
+                window.window().set_minimized(false);
+                match window.show() {
+                    Ok(()) => self.desktop = next,
+                    Err(e) => crate::log!("ウィンドウの再表示に失敗: {}", e),
+                }
+            }
+            tray::DesktopAction::Quit => {
+                self.desktop = next;
+                self.hide_tray_and_quit();
+            }
+        }
+    }
+
+    fn hide_tray_and_quit(&self) {
+        if let Some(tray) = self.tray.as_ref().and_then(|w| w.upgrade()) {
+            let _ = tray.hide();
+        }
         let _ = slint::quit_event_loop();
     }
 
