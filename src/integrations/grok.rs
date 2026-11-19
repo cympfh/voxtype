@@ -7,10 +7,13 @@
 
 use serde::Serialize;
 
+use crate::config::TranslateModel;
+
 const XAI_CHAT_URL: &str = "https://api.x.ai/v1/chat/completions";
 /// 質問モード用。サーバーサイド検索 (web_search/x_search) は
 /// Responses API (Agent Tools) でしか使えない。旧 Live Search (search_parameters) は廃止済み
 const XAI_RESPONSES_URL: &str = "https://api.x.ai/v1/responses";
+/// 校正・質問のモデル。翻訳のモデルは設定 (TranslateModel) で選ぶ
 const MODEL: &str = "grok-4.7";
 /// grok-4.7 は reasoning を無効化できないので最小の low を指定する
 const REASONING_EFFORT: &str = "low";
@@ -32,32 +35,11 @@ const PROOFREAD_PROMPT: &str = "\
 
 校正結果のみを返してください。前置き・説明は一切不要です。";
 
-/// 翻訳: eliza-agent-server の eliza/prompt/TRANSLATE_INSTRUCTION.md からの移植。
-/// 翻訳元言語は指定しない(自動判定)
-const TRANSLATE_PROMPT: &str = "\
-あなたは高精度な翻訳者です。
-翻訳先言語: {target_lang}
-
-翻訳結果のみを返してください。前置き・説明・「翻訳結果は」などの文言は一切不要です。
-
-例:
-翻訳元: 日本語
-翻訳先: 英語
-翻訳テキスト: こんにちわ
-翻訳結果: Hello
-
-翻訳先: 英語
-翻訳テキスト: おはようございます
-翻訳結果: Good morning
-
-翻訳元: 英語
-翻訳先: 日本語
-翻訳テキスト: Thank you very much
-翻訳結果: どうもありがとうございます
-
-翻訳先: 中国語
-翻訳テキスト: Good morning
-翻訳結果: 早上好";
+/// 翻訳。翻訳元言語は指定しない(自動判定)。
+/// 以前の few-shot 付きのプロンプトは、grok-4.20 non-reasoning で訳文の頭に
+/// 「结果：」が付くことがあった。この 1 文にしても 4 モデルとも訳の質は落ちず、
+/// 質問や指示の文も答えずに訳した(issue #20)
+const TRANSLATE_PROMPT: &str = "入力を{target_lang}に翻訳し、訳文だけを出力する。";
 
 /// 質問: eliza-agent-server の eliza/prompt/ELIZA.md から話し方の指針だけ移植
 /// (agent_name=question, context=vrchat)。ペルソナ・memory は持ち込まない
@@ -107,7 +89,9 @@ struct ChatMessage<'a> {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    reasoning_effort: &'a str,
+    /// None なら送らない(grok-4.20 non-reasoning)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
     messages: Vec<ChatMessage<'a>>,
 }
 
@@ -172,13 +156,24 @@ impl GrokClient {
 
     /// 校正: フィラー除去・言い間違い修正のみ。内容は変えない
     pub fn correct(&self, text: &str) -> Result<String, String> {
-        self.chat(PROOFREAD_PROMPT, text)
+        self.chat(chat_request(
+            MODEL,
+            Some(REASONING_EFFORT),
+            PROOFREAD_PROMPT,
+            text,
+        ))
     }
 
-    /// 翻訳: 翻訳元は自動判定、翻訳先は target_lang (「英語」などの表示名)
-    pub fn translate(&self, target_lang: &str, text: &str) -> Result<String, String> {
-        let prompt = TRANSLATE_PROMPT.replace("{target_lang}", target_lang);
-        self.chat(&prompt, text)
+    /// 翻訳: 翻訳元は自動判定、翻訳先は target_lang (「英語」などの表示名)。
+    /// モデルと reasoning の強さは model で決まる
+    pub fn translate(
+        &self,
+        model: TranslateModel,
+        target_lang: &str,
+        text: &str,
+    ) -> Result<String, String> {
+        let prompt = translate_prompt(target_lang);
+        self.chat(translate_request(model, &prompt, text))
     }
 
     /// 質問: Responses API のサーバーサイドツール (web_search / x_search /
@@ -284,22 +279,7 @@ impl GrokClient {
             .ok_or_else(|| format!("xAI response had no content. Body was: {}", raw))
     }
 
-    fn chat(&self, system: &str, user: &str) -> Result<String, String> {
-        let request = ChatRequest {
-            model: MODEL,
-            reasoning_effort: REASONING_EFFORT,
-            messages: vec![
-                ChatMessage {
-                    role: "system",
-                    content: system,
-                },
-                ChatMessage {
-                    role: "user",
-                    content: user,
-                },
-            ],
-        };
-
+    fn chat(&self, request: ChatRequest<'_>) -> Result<String, String> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
@@ -327,6 +307,37 @@ impl GrokClient {
     }
 }
 
+fn translate_prompt(target_lang: &str) -> String {
+    TRANSLATE_PROMPT.replace("{target_lang}", target_lang)
+}
+
+fn chat_request<'a>(
+    model: &'a str,
+    reasoning_effort: Option<&'a str>,
+    system: &'a str,
+    user: &'a str,
+) -> ChatRequest<'a> {
+    ChatRequest {
+        model,
+        reasoning_effort,
+        messages: vec![
+            ChatMessage {
+                role: "system",
+                content: system,
+            },
+            ChatMessage {
+                role: "user",
+                content: user,
+            },
+        ],
+    }
+}
+
+/// 翻訳のリクエスト。モデル ID と reasoning_effort は TranslateModel から決める
+fn translate_request<'a>(model: TranslateModel, prompt: &'a str, text: &'a str) -> ChatRequest<'a> {
+    chat_request(model.model_id(), model.reasoning_effort(), prompt, text)
+}
+
 /// 出力フォーマットのテンプレートを埋める。
 /// 使えるプレースホルダ(ASCII のみ): `{source}` `{translated}` `{answer}`。
 /// 知らないプレースホルダはそのまま残す
@@ -346,8 +357,46 @@ mod tests {
     fn test_translate_prompt_has_target_lang() {
         let client = GrokClient::new("key".to_string());
         let _ = &client; // 構築できること
-        let prompt = TRANSLATE_PROMPT.replace("{target_lang}", "英語");
-        assert!(prompt.contains("翻訳先言語: 英語"));
+        let prompt = translate_prompt("英語");
+        assert_eq!(prompt, "入力を英語に翻訳し、訳文だけを出力する。");
+        // few-shot の「翻訳結果:」は訳文に混ざるので入れない
+        assert!(!prompt.contains("翻訳結果"));
+    }
+
+    #[test]
+    fn test_translate_request_model_and_effort() {
+        let cases = [
+            (
+                TranslateModel::Grok420,
+                "grok-4.20-0309-non-reasoning",
+                None,
+            ),
+            (TranslateModel::Grok47, "grok-4.7", Some("low")),
+            (TranslateModel::Grok45, "grok-4.5", Some("low")),
+            (TranslateModel::Grok43, "grok-4.3", Some("none")),
+        ];
+        for (model, id, effort) in cases {
+            let request = translate_request(model, "prompt", "こんにちは");
+            let json: serde_json::Value = serde_json::to_value(&request).unwrap();
+            assert_eq!(json["model"], id);
+            match effort {
+                Some(e) => assert_eq!(json["reasoning_effort"], e),
+                // reasoning なしのモデルにはキーごと送らない
+                None => assert!(json.get("reasoning_effort").is_none()),
+            }
+            assert_eq!(json["messages"][0]["role"], "system");
+            assert_eq!(json["messages"][0]["content"], "prompt");
+            assert_eq!(json["messages"][1]["role"], "user");
+            assert_eq!(json["messages"][1]["content"], "こんにちは");
+        }
+    }
+
+    #[test]
+    fn test_proofread_request_stays_on_grok_4_7_low() {
+        let request = chat_request(MODEL, Some(REASONING_EFFORT), PROOFREAD_PROMPT, "えーと");
+        let json: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["model"], "grok-4.7");
+        assert_eq!(json["reasoning_effort"], "low");
     }
 
     #[test]
@@ -371,7 +420,7 @@ mod tests {
     fn test_chat_request_serializes_model_and_effort() {
         let request = ChatRequest {
             model: MODEL,
-            reasoning_effort: REASONING_EFFORT,
+            reasoning_effort: Some(REASONING_EFFORT),
             messages: vec![ChatMessage {
                 role: "user",
                 content: "hi",

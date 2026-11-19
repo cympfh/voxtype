@@ -46,6 +46,103 @@ pub enum Mode {
     Question,
 }
 
+/// 翻訳モードで使う Grok のモデル。設定画面には表示名だけを出し、
+/// reasoning の強さはここで決める(issue #20)。質問モードと校正は対象外
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TranslateModel {
+    /// grok-4.20-0309-non-reasoning。reasoning なしで一番速い
+    #[default]
+    Grok420,
+    /// grok-4.7 (reasoning low)。0.11 までの翻訳と同じ
+    Grok47,
+    /// grok-4.5 (reasoning low)
+    Grok45,
+    /// grok-4.3 (reasoning none)
+    Grok43,
+}
+
+impl TranslateModel {
+    /// 設定画面の ComboBox の並び順
+    pub const ALL: [TranslateModel; 4] = [
+        TranslateModel::Grok420,
+        TranslateModel::Grok47,
+        TranslateModel::Grok45,
+        TranslateModel::Grok43,
+    ];
+
+    /// 設定画面と config.json に出す名前
+    pub fn display_name(self) -> &'static str {
+        match self {
+            TranslateModel::Grok420 => "grok-4.20",
+            TranslateModel::Grok47 => "grok-4.7",
+            TranslateModel::Grok45 => "grok-4.5",
+            TranslateModel::Grok43 => "grok-4.3",
+        }
+    }
+
+    /// API に渡すモデル ID
+    pub fn model_id(self) -> &'static str {
+        match self {
+            TranslateModel::Grok420 => "grok-4.20-0309-non-reasoning",
+            TranslateModel::Grok47 => "grok-4.7",
+            TranslateModel::Grok45 => "grok-4.5",
+            TranslateModel::Grok43 => "grok-4.3",
+        }
+    }
+
+    /// chat completions の `reasoning_effort`。None なら送らない。
+    /// grok-4.7 / 4.5 は reasoning を切れないので最小の low、
+    /// grok-4.3 は none で切れる。grok-4.20 non-reasoning は指定しない
+    pub fn reasoning_effort(self) -> Option<&'static str> {
+        match self {
+            TranslateModel::Grok420 => None,
+            TranslateModel::Grok47 | TranslateModel::Grok45 => Some("low"),
+            TranslateModel::Grok43 => Some("none"),
+        }
+    }
+
+    pub fn from_display_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.display_name() == name)
+    }
+
+    /// ComboBox の位置
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|m| *m == self).unwrap_or(0)
+    }
+
+    /// ComboBox の位置から。範囲外は既定
+    pub fn from_index(i: i32) -> Self {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| Self::ALL.get(i).copied())
+            .unwrap_or_default()
+    }
+}
+
+impl Serialize for TranslateModel {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.display_name())
+    }
+}
+
+/// 知らない値(文字列以外も含む)は既定の grok-4.20 にしてログに残す。
+/// 設定ファイル全体の読み込みは失敗させない
+impl<'de> Deserialize<'de> for TranslateModel {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let parsed = value.as_str().and_then(TranslateModel::from_display_name);
+        Ok(parsed.unwrap_or_else(|| {
+            let fallback = TranslateModel::default();
+            crate::log!(
+                "[App] translate_model {} は知らない値なので {} を使う",
+                value,
+                fallback.display_name()
+            );
+            fallback
+        }))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -77,6 +174,9 @@ pub struct Config {
     /// 翻訳先言語の現在の選択。translate_langs のどれか
     #[serde(default = "default_translate_lang_selected")]
     pub translate_lang_selected: String,
+    /// 翻訳に使うモデル。無ければ grok-4.20
+    #[serde(default)]
+    pub translate_model: TranslateModel,
     /// 翻訳モードの出力テンプレート。`{source}` `{translated}` が使える
     #[serde(default = "default_translate_format")]
     pub translate_format: String,
@@ -179,6 +279,7 @@ impl Default for Config {
             mode: Mode::default(),
             translate_langs: default_translate_langs(),
             translate_lang_selected: default_translate_lang_selected(),
+            translate_model: TranslateModel::default(),
             translate_format: default_translate_format(),
             question_format: default_question_format(),
             translate_pending_format: default_pending_format(),
@@ -544,5 +645,71 @@ mod tests {
         assert!(!copy_legacy_config_if_needed(&new_dir, &old_dir).unwrap());
         assert!(!new_dir.join("config.json").exists());
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_translate_model_mapping() {
+        let cases = [
+            (
+                TranslateModel::Grok420,
+                "grok-4.20",
+                "grok-4.20-0309-non-reasoning",
+                None,
+            ),
+            (TranslateModel::Grok47, "grok-4.7", "grok-4.7", Some("low")),
+            (TranslateModel::Grok45, "grok-4.5", "grok-4.5", Some("low")),
+            (TranslateModel::Grok43, "grok-4.3", "grok-4.3", Some("none")),
+        ];
+        for (i, (m, name, id, effort)) in cases.into_iter().enumerate() {
+            assert_eq!(m.display_name(), name);
+            assert_eq!(m.model_id(), id);
+            assert_eq!(m.reasoning_effort(), effort);
+            assert_eq!(TranslateModel::from_display_name(name), Some(m));
+            assert_eq!(m.index(), i);
+            assert_eq!(TranslateModel::from_index(i as i32), m);
+        }
+        assert_eq!(TranslateModel::ALL.len(), 4);
+    }
+
+    #[test]
+    fn test_translate_model_from_index_out_of_range_is_default() {
+        assert_eq!(TranslateModel::from_index(-1), TranslateModel::Grok420);
+        assert_eq!(TranslateModel::from_index(4), TranslateModel::Grok420);
+    }
+
+    #[test]
+    fn test_translate_model_default_is_grok420() {
+        assert_eq!(Config::default().translate_model, TranslateModel::Grok420);
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.translate_model, TranslateModel::Grok420);
+    }
+
+    #[test]
+    fn test_translate_model_serde_roundtrip() {
+        for m in TranslateModel::ALL {
+            let config = Config {
+                translate_model: m,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            assert!(json.contains(&format!("\"translate_model\":\"{}\"", m.display_name())));
+            let restored: Config = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.translate_model, m);
+        }
+    }
+
+    #[test]
+    fn test_translate_model_unknown_value_falls_back_to_default() {
+        for raw in [
+            r#"{"translate_model": "grok-9", "mode": "translate"}"#,
+            r#"{"translate_model": "grok-4.20-0309-non-reasoning", "mode": "translate"}"#,
+            r#"{"translate_model": 3, "mode": "translate"}"#,
+            r#"{"translate_model": null, "mode": "translate"}"#,
+        ] {
+            let config = Config::migrate_and_parse(raw).unwrap();
+            assert_eq!(config.translate_model, TranslateModel::Grok420, "{}", raw);
+            // ほかの設定は読めている
+            assert_eq!(config.mode, Mode::Translate);
+        }
     }
 }

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-19
+
+### Added
+
+- 設定画面に「翻訳用モデル」を追加した。grok-4.20 / grok-4.7 / grok-4.5 / grok-4.3 から選べ、既定は grok-4.20。reasoning の強さは表示せず、モデルごとに決めてある (grok-4.20 は non-reasoning、grok-4.7 と grok-4.5 は low、grok-4.3 は none)。校正と質問は今までどおり grok-4.7 を使う
+
+### Changed
+
+- 翻訳のプロンプトを「入力を{target_lang}に翻訳し、訳文だけを出力する。」の 1 文にした。以前の few-shot 付きのプロンプトでは、grok-4.20 で訳文の頭に「结果：」が付くことがあった
+- 設定ファイルに `translate_model` がないときは grok-4.20 を使う。知らない値のときも grok-4.20 にしてログに残す
+
 ## [0.11.0] - 2026-11-19
 
 ### Changed
